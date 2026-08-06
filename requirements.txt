@@ -1,0 +1,20 @@
+# ======================================================================
+# VPSI-TRUTH  ---  requirements
+# ======================================================================
+#
+# The engine runs on the standard library. Nothing that samples is
+# admitted, so nothing that samples is listed.
+#
+#   fractions       exact rationals for ALPHA and BETA        stdlib
+#   math            reading of the transcendental angle       stdlib
+#   importlib.util  container discovery                       stdlib
+#   hashlib         digests                                   stdlib
+#   sqlite3         cache and record                          stdlib
+#   json            serialisation                             stdlib
+#   pathlib         paths                                     stdlib
+#   dataclasses     contracts                                 stdlib
+#   traceback       isolated failure reporting                stdlib
+#
+# ======================================================================
+
+pytest==8.3.4
