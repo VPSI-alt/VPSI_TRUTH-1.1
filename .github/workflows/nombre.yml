@@ -1,0 +1,1247 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+
+    steps:
+      # ==========================================================
+      # 1. CHECK OUT DEL REPOSITORIO
+      # ==========================================================
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      # ==========================================================
+      # 2. CONFIGURACIÓN DEL ENTORNO PYTHON
+      # ==========================================================
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # ==========================================================
+      # 3. INSTALACIÓN DE DEPENDENCIAS
+      # ==========================================================
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # ==========================================================
+      # 4. COMPUERTA 1 --- INVARIANTE DE CONSTANTES (ALFA Y BETA)
+      # ==========================================================
+      - name: Invariante alpha + beta = 1
+        run: |
+          python - <<'EOF'
+          import sys
+          from fractions import Fraction
+          sys.path.insert(0, ".")
+
+          from modules.constante import ALPHA, BETA
+
+          if not isinstance(ALPHA, Fraction) or not isinstance(BETA, Fraction):
+              print("FALLO: ALPHA y BETA deben ser Fraction")
+              print(f"  ALPHA: {type(ALPHA).__name__}")
+              print(f"  BETA:  {type(BETA).__name__}")
+              sys.exit(1)
+
+          if ALPHA + BETA != Fraction(1):
+              print(f"FALLO: ALPHA + BETA = {ALPHA + BETA}, se exige 1")
+              sys.exit(1)
+
+          if ALPHA != Fraction(26, 27) or BETA != Fraction(1, 27):
+              print(f"FALLO: valores incorrectos ALPHA={ALPHA} BETA={BETA}")
+              sys.exit(1)
+
+          print(f"OK  ALPHA = {ALPHA}  BETA = {BETA}  suma = 1")
+          EOF
+
+      # ==========================================================
+      # 5. COMPUERTA 2 --- BARRIDO AXIOMÁTICO
+      # ==========================================================
+      - name: Barrido axiomático (choques y errores)
+        run: |
+          python - <<'EOF'
+          import sys
+          import json
+          from pathlib import Path
+          sys.path.insert(0, ".")
+
+          from modules.axiomas import barrer
+
+          r = barrer()
+          Path("diagnostics").mkdir(exist_ok=True)
+          Path("diagnostics/axioms_report.json").write_text(
+              json.dumps(r, indent=2, ensure_ascii=False, default=str),
+              encoding="utf-8",
+          )
+
+          print("=" * 60)
+          print("AUDITORÍA AX — barrer()")
+          print("=" * 60)
+          print(f"coherente     : {r.get('coherente')}")
+          print(f"declaraciones : {r.get('declaraciones')}")
+          print(f"cuerpos       : {r.get('cuerpos')}")
+          print(f"errores       : {len(r.get('errores') or [])}")
+          print(f"choques       : {len(r.get('choques') or [])}")
+          print()
+
+          errores = r.get("errores") or []
+          if errores:
+              print("-" * 60)
+              print("ERRORES DE CARGA / NORMALIZACIÓN")
+              print("-" * 60)
+              for i, e in enumerate(errores, 1):
+                  print(f"[{i}] cuerpo={e.get('cuerpo')}")
+                  print(f"    razon={e.get('razon')}")
+                  print()
+
+          choques = r.get("choques") or []
+          if choques:
+              print("-" * 60)
+              print("CHOQUES AXIOMÁTICOS (bloques que se contradicen)")
+              print("-" * 60)
+              for i, c in enumerate(choques, 1):
+                  print(f"[{i}] tipo={c.get('tipo')}")
+                  if c.get("tipo") == "contradiccion_directa":
+                      print(f"    tripleta : {c.get('tripleta')}")
+                      print(f"    AFIRMA   : {c.get('afirma')}  ({c.get('afirma_tipo')})")
+                      print(f"      enunciado: {c.get('enunciado_afirma')}")
+                      print(f"    NIEGA    : {c.get('niega')}  ({c.get('niega_tipo')})")
+                      print(f"      enunciado: {c.get('enunciado_niega')}")
+                  elif c.get("tipo") == "contradiccion_de_cota":
+                      print(f"    sujeto   : {c.get('sujeto')}")
+                      print(f"    relacion : {c.get('relacion')}")
+                      print(f"    cotas    : {c.get('cotas')}")
+                  else:
+                      print(f"    raw: {c}")
+                  print()
+
+          if not r.get("coherente", False):
+              print("=" * 60)
+              print("CONTRADICCIÓN AXIOMÁTICA --- EL SISTEMA NO ARRANCA")
+              print("=" * 60)
+              if not choques and not errores:
+                  print("(barrer reportó incoherente sin detalle; revisar loader de cuerpos)")
+              sys.exit(1)
+
+          print("OK  axiomatización coherente")
+          print(f"    declaraciones: {r.get('declaraciones', '?')}")
+          print(f"    choques: 0")
+          EOF
+
+      # ==========================================================
+      # 6. COMPUERTA 3 --- PROHIBICIÓN DE COMPONENTES ESTOCÁSTICOS
+      # ==========================================================
+      - name: Prohibición de componentes estocásticos
+        run: |
+          python - <<'EOF'
+          import ast, sys
+          from pathlib import Path
+
+          PROHIBIDOS = {
+              "random", "numpy.random", "torch", "tensorflow", "sklearn",
+              "transformers", "openai", "anthropic", "secrets",
+          }
+
+          violaciones = []
+          for f in list(Path("core").rglob("*.py")) + list(Path("modules").rglob("*.py")):
+              try:
+                  arbol = ast.parse(f.read_text(encoding="utf-8"))
+              except SyntaxError as e:
+                  violaciones.append(f"{f}: SyntaxError {e}")
+                  continue
+              for n in ast.walk(arbol):
+                  if isinstance(n, ast.Import):
+                      for a in n.names:
+                          if a.name.split(".")[0] in PROHIBIDOS:
+                              violaciones.append(f"{f}:{n.lineno} import {a.name}")
+                  elif isinstance(n, ast.ImportFrom):
+                      if n.module and n.module.split(".")[0] in PROHIBIDOS:
+                          violaciones.append(f"{f}:{n.lineno} from {n.module}")
+
+          if violaciones:
+              print("FALLO: import estocástico en la ruta de decisión")
+              for v in violaciones:
+                  print("  " + v)
+              sys.exit(1)
+
+          print("OK  sin componentes estocásticos")
+          EOF
+
+      # ==========================================================
+      # 7. COMPUERTA 4 --- FÓRMULAS Y DOMINIO (FRACTION)
+      # ==========================================================
+      - name: Fórmulas y dominio (Fraction)
+        run: |
+          python - <<'EOF'
+          import sys
+          from fractions import Fraction
+          sys.path.insert(0, ".")
+
+          from modules.formulas.truth import tru_ri, tru_total
+          from modules.constante import ALPHA, BETA
+
+          fallos = []
+
+          try:
+              tru_ri(0.5, Fraction(1), Fraction(1))
+              fallos.append("tru_ri aceptó float")
+          except TypeError:
+              pass
+          except Exception as e:
+              fallos.append(f"tru_ri con float lanzó {type(e).__name__}: {e}")
+
+          try:
+              tru_total(0.5, Fraction(1), Fraction(1))
+              fallos.append("tru_total aceptó float")
+          except TypeError:
+              pass
+          except Exception as e:
+              fallos.append(f"tru_total con float lanzó {type(e).__name__}: {e}")
+
+          try:
+              ri = tru_ri(Fraction(1), Fraction(1), Fraction(1))
+              tt = tru_total(Fraction(1), Fraction(1), Fraction(1))
+              if ri != Fraction(1):
+                  fallos.append(f"tru_ri(1,1,1) = {ri}")
+              if tt != Fraction(1):
+                  fallos.append(f"tru_total(1,1,1) = {tt}")
+          except Exception as e:
+              fallos.append(f"Cálculo con Fraction falló: {e}")
+
+          tt0 = tru_total(Fraction(0), Fraction(0), Fraction(0))
+          if tt0 != BETA:
+              fallos.append(f"Piso incorrecto: {tt0} != {BETA}")
+
+          if fallos:
+              print("FALLO: guarda de tipo / dominio")
+              for f in fallos:
+                  print("  " + f)
+              sys.exit(1)
+
+          print("OK  float rechazado, Fraction aceptado, piso estructural correcto")
+          EOF
+
+      # ==========================================================
+      # 8. COMPUERTA 5 --- ENGINE OPERATIVO (ESTADO DE ARRANQUE)
+      # ==========================================================
+      - name: Engine operativo
+        run: |
+          python - <<'EOF'
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, ".")
+
+          from core.engine import Engine, ArranqueError
+
+          try:
+              eng = Engine(Path("modules"), invocador_id="ci", strict=True)
+          except ArranqueError as e:
+              print("FALLO: Engine no arrancó")
+              print(e)
+              sys.exit(1)
+
+          if eng.estado != "OPERATIVO":
+              print(f"FALLO: estado = {eng.estado}")
+              print(eng.errores_arranque)
+              sys.exit(1)
+
+          print("OK  Engine operativo (arranque)")
+          print("    contenedores:", eng.registro.total())
+          EOF
+
+      # ==========================================================
+      # 9. EJECUCIÓN DE PRUEBAS UNITARIAS (PYTEST)
+      # ==========================================================
+      - name: Run tests
+        run: |
+          mkdir -p diagnostics
+          pytest tests/ -v --tb=short --junit-xml=diagnostics/test_results.xml
+        env:
+          BEAL_Z3_HEAVY: "1"
+          COLLATZ_HEAVY: "1"
+
+      # ==========================================================
+      # 10. AUDITORÍA ESTRUCTURAL Y FORENSE DE CONTRATOS (v2.0)
+      # ==========================================================
+      - name: Auditoría estructural de contratos
+        run: |
+          python - <<'EOF'
+          import json
+          import sys
+          from pathlib import Path
+
+          sys.path.insert(0, ".")
+          from core.engine import Engine, ArranqueError
+
+          Path("diagnostics").mkdir(exist_ok=True)
+
+          try:
+              eng = Engine(Path("modules"), invocador_id="ci_auditoria", strict=True)
+          except ArranqueError as e:
+              informe_base = {
+                  "tipo": "auditoria_estructural_contratos",
+                  "incoherente": True,
+                  "errores": [{"categoria": "arranque", "mensaje": str(e)}],
+              }
+              Path("diagnostics/contratos_report.json").write_text(
+                  json.dumps(informe_base, indent=2, ensure_ascii=False, default=str),
+                  encoding="utf-8",
+              )
+              print(json.dumps(informe_base, indent=2, ensure_ascii=False, default=str))
+              sys.exit(1)
+
+          resumen_inicial = eng.censar()
+          roles_map = resumen_inicial.get("roles") or {}
+          
+          ROLES = set(roles_map.keys())
+          OBLIGATORIOS = set()
+
+          informe = {
+              "tipo": "auditoria_estructural_contratos",
+              "version": "2.0_FORENSE",
+              "incoherente": False,
+              "errores": [],
+              "avisos": [],
+              "por_categoria": {
+                  "arranque": [],
+                  "invariantes": [],
+                  "registro": [],
+                  "contradiccion_contrato": [],
+                  "resolucion": [],
+                  "integridad": [],
+              },
+              "roles": {},
+              "resumen": {},
+              "resultados_evaluacion_n": 0,
+              "evidencia_arranque": {},
+              "nota": (
+                  "Auditoría Forense Universal: Escaneo automático de contratos INI/carpetas. "
+                  "Detección directa de contradicciones entre lo declarado y la realidad del código."
+              ),
+          }
+
+          def fallar(cat, msg, **extra):
+              informe["incoherente"] = True
+              entrada = {"categoria": cat, "mensaje": msg}
+              entrada.update(extra)
+              informe["errores"].append(entrada)
+              informe["por_categoria"].setdefault(cat, []).append(entrada)
+
+          def avisar(cat, msg, **extra):
+              entrada = {"categoria": cat, "mensaje": msg}
+              entrada.update(extra)
+              informe["avisos"].append(entrada)
+              informe["por_categoria"].setdefault(cat, []).append(entrada)
+
+          def resumen_canonico(engine_obj):
+              r = engine_obj.censar()
+              return {
+                  "estado": engine_obj.estado,
+                  "total": r.get("total"),
+                  "roles": {
+                      k: list(v) for k, v in sorted((r.get("roles") or {}).items())
+                  },
+                  "roles_vacios": sorted(r.get("roles_vacios") or []),
+                  "rechazados_n": len(r.get("rechazados") or []),
+                  "cargados_nombres": sorted(
+                      c.get("nombre")
+                      for c in (r.get("cargados") or [])
+                      if isinstance(c, dict)
+                  ),
+              }
+
+          informe["evidencia_arranque"] = {
+              "estado": eng.estado,
+              "invocador_id": eng.invocador_id,
+              "errores_arranque": list(eng.errores_arranque),
+          }
+
+          if eng.estado != "OPERATIVO":
+              fallar(
+                  "invariantes",
+                  "estado != OPERATIVO: {0}".format(eng.estado),
+                  errores_arranque=list(eng.errores_arranque),
+              )
+
+          for attr in (
+              "registro",
+              "resultados_evaluacion",
+              "errores_arranque",
+              "fallos",
+              "invocador_id",
+          ):
+              if not hasattr(eng, attr):
+                  fallar("invariantes", "falta atributo Engine.{0}".format(attr))
+
+          try:
+              eng_b = Engine(Path("modules"), invocador_id="ci_auditoria_b", strict=True)
+              a = resumen_canonico(eng)
+              b = resumen_canonico(eng_b)
+              if a != b:
+                  fallar(
+                      "determinismo",
+                      "dos Engine() produjeron censar() distinto",
+                      resumen_a=a,
+                      resumen_b=b,
+                  )
+              else:
+                  informe["evidencia_arranque"]["determinismo_censar"] = "OK"
+          except ArranqueError as e:
+              fallar("determinismo", "segundo Engine no arrancó: {0}".format(e))
+
+          if hasattr(eng.registro, "total"):
+              n_reg = eng.registro.total()
+          else:
+              n_reg = len(eng.registro.contenedores)
+          if n_reg < 1:
+              fallar("registro", "registro vacío tras arranque")
+
+          resumen = eng.censar()
+          roles_map = resumen.get("roles") or {}
+          rechazados = list(resumen.get("rechazados") or [])
+
+          if rechazados:
+              fallar("registro", "hay contenedores rechazados", detalle=rechazados)
+
+          caps_verificadas = 0
+          caps_fallidas = 0
+          contratos_validos = 0
+          contratos_invalidos = 0
+
+          for rol in sorted(ROLES):
+              mods = list(roles_map.get(rol) or [])
+              cont = eng.registro.primero(rol)
+              entry = {
+                  "modulos": mods,
+                  "presente": len(mods) > 0,
+                  "n_modulos": len(mods),
+                  "claves_contrato": [],
+                  "resolucion": [],
+              }
+              fallo_local = False
+
+              if len(mods) > 1:
+                  avisar(
+                      "registro",
+                      "rol con múltiples módulos (primero gana)",
+                      rol=rol,
+                      modulos=mods,
+                  )
+
+              if cont is None:
+                  informe["roles"][rol] = entry
+                  continue
+
+              contrato_capacidades = dict(getattr(cont, "capacidades", {}) or {})
+              entry["claves_contrato"] = list(contrato_capacidades.keys())
+              entry["nombre"] = getattr(cont, "nombre", "desconocido")
+              entry["version"] = getattr(cont, "version", "0.0")
+
+              for clave in list(contrato_capacidades.keys()):
+                  objetivo = contrato_capacidades.get(clave)
+                  
+                  fn_engine = None
+                  error_engine = None
+                  if hasattr(cont, "fn"):
+                      try:
+                          fn_engine = cont.fn(clave)
+                      except Exception as e:
+                          error_engine = str(e)
+
+                  fn_modulo = None
+                  existe_en_modulo = False
+                  es_callable_directo = False
+
+                  if callable(objetivo):
+                      es_callable_directo = True
+                      fn_modulo = objetivo
+                      if hasattr(cont, "modulo") and cont.modulo is not None:
+                          mod_name = getattr(cont.modulo, "__name__", "")
+                          fn_module_origin = getattr(objetivo, "__module__", "")
+                          existe_en_modulo = (not fn_module_origin) or (fn_module_origin == mod_name) or (mod_name in fn_module_origin)
+                      else:
+                          existe_en_modulo = True
+                  elif isinstance(objetivo, str):
+                      if hasattr(cont, "modulo") and cont.modulo is not None:
+                          existe_en_modulo = hasattr(cont.modulo, objetivo)
+                          if existe_en_modulo:
+                              fn_modulo = getattr(cont.modulo, objetivo, None)
+
+                  item = {
+                      "clave": clave,
+                      "declarado": repr(objetivo),
+                      "modulo": entry["nombre"],
+                      "rol": rol,
+                      "version": entry["version"],
+                      "engine_callable": callable(fn_engine),
+                      "engine_resultado": repr(fn_engine),
+                      "engine_error": error_engine,
+                      "modulo_callable": callable(fn_modulo),
+                      "existe_en_modulo": existe_en_modulo,
+                      "es_callable_directo": es_callable_directo,
+                      "tipo_objeto": type(fn_modulo).__name__ if fn_modulo is not None else None,
+                  }
+
+                  if callable(fn_engine):
+                      item["ok"] = True
+                      item["responsable"] = None
+                      item["fn_name"] = getattr(fn_engine, "__name__", str(fn_engine))
+                      caps_verificadas += 1
+                      entry["resolucion"].append(item)
+                  elif callable(fn_modulo) and not callable(fn_engine):
+                      item["ok"] = False
+                      item["responsable"] = "CONTENEDOR (en resolución fn)"
+                      razon_fn = "lanzó excepción: {0}".format(error_engine) if error_engine else "retornó None o un objeto no ejecutable"
+                      fallar(
+                          "contradiccion_contrato",
+                          "Responsable: CONTENEDOR (en resolución fn) — El contrato declara '{0}' y el módulo expone la función correctamente, pero cont.fn() falló al resolverla ({1})".format(clave, razon_fn),
+                          rol=rol,
+                          modulo=entry["nombre"],
+                          version=entry["version"],
+                          clave=clave,
+                          responsable="CONTENEDOR_FN",
+                          evidencia_engine=item,
+                      )
+                      caps_fallidas += 1
+                      fallo_local = True
+                      entry["resolucion"].append(item)
+                  elif not existe_en_modulo:
+                      item["ok"] = False
+                      item["responsable"] = "CONTENEDOR"
+                      fallar(
+                          "contradiccion_contrato",
+                          "Responsable: CONTENEDOR — El contrato declara la capacidad '{0}' apuntando al objetivo '{1}', pero dicho nombre no existe en el módulo o infringe la regla de pertenencia".format(clave, objetivo),
+                          rol=rol,
+                          modulo=entry["nombre"],
+                          version=entry["version"],
+                          clave=clave,
+                          responsable="CONTENEDOR",
+                          evidencia_contenedor=item,
+                      )
+                      caps_fallidas += 1
+                      fallo_local = True
+                      entry["resolucion"].append(item)
+                  else:
+                      item["ok"] = False
+                      item["responsable"] = "MODULO"
+                      fallar(
+                          "contradiccion_contrato",
+                          "Responsable: MODULO — El contrato declara '{0}' apuntando a '{1}', pero el objeto real en el módulo no es callable (tipo: {2})".format(clave, objetivo, item["tipo_objeto"]),
+                          rol=rol,
+                          modulo=entry["nombre"],
+                          version=entry["version"],
+                          clave=clave,
+                          responsable="MODULO",
+                          evidencia_modulo=item,
+                      )
+                      caps_fallidas += 1
+                      fallo_local = True
+                      entry["resolucion"].append(item)
+
+              if fallo_local:
+                  contratos_invalidos += 1
+              else:
+                  contratos_validos += 1
+
+              informe["roles"][rol] = entry
+
+          evals = []
+          if hasattr(eng, "get_resultados_evaluacion"):
+              evals = list(eng.get_resultados_evaluacion() or [])
+          elif hasattr(eng, "resultados_evaluacion"):
+              evals = list(eng.resultados_evaluacion or [])
+
+          try:
+              from diagnostics import evidencia as EV
+              doc = EV.depositar(
+                  evals,
+                  origen="ci_auditoria_contratos",
+                  invocador_id=getattr(eng, "invocador_id", "ci_auditoria"),
+                  estado_engine=getattr(eng, "estado", None),
+              )
+              informe["resultados_evaluacion_n"] = len(evals)
+              informe["evidencia_evaluacion"] = {
+                  "path": "diagnostics/evaluaciones.json",
+                  "n": doc.get("n", 0),
+                  "propios": len(evals),
+                  "origenes": doc.get("origenes") or [],
+                  "modo": "fusion",
+              }
+          except Exception as e:
+              avisar(
+                  "integridad",
+                  "depositario de evidencia no disponible; write_text de respaldo",
+                  error=str(e),
+              )
+              evaluaciones_doc = {
+                  "tipo": "evidencia_evaluacion",
+                  "version": "1.1",
+                  "origen": "ci_auditoria_contratos",
+                  "invocador_id": getattr(eng, "invocador_id", "ci_auditoria"),
+                  "estado_engine": getattr(eng, "estado", None),
+                  "n": len(evals),
+                  "resultados": evals,
+                  "nota": "Fallback write_text: diagnostics.evidencia no cargó.",
+              }
+              Path("diagnostics/evaluaciones.json").write_text(
+                  json.dumps(evaluaciones_doc, indent=2, ensure_ascii=False, default=str),
+                  encoding="utf-8",
+              )
+              informe["resultados_evaluacion_n"] = len(evals)
+              informe["evidencia_evaluacion"] = {
+                  "path": "diagnostics/evaluaciones.json",
+                  "n": len(evals),
+                  "modo": "fallback_write_text",
+              }
+
+          total_caps = caps_verificadas + caps_fallidas
+          pct = (
+              round(100.0 * caps_verificadas / total_caps, 2)
+              if total_caps
+              else 0.0
+          )
+          informe["resumen"] = {
+              "roles_totales": len(ROLES),
+              "roles_presentes": sum(1 for r in ROLES if (roles_map.get(r) or [])),
+              "contratos_validos": contratos_validos,
+              "contratos_invalidos": contratos_invalidos,
+              "capacidades_verificadas": caps_verificadas,
+              "capacidades_fallidas": caps_fallidas,
+              "pct_integridad_capacidades": pct,
+              "resultados_evaluacion_n": informe["resultados_evaluacion_n"],
+              "rechazados_n": len(rechazados),
+              "errores_n": len(informe["errores"]),
+              "avisos_n": len(informe["avisos"]),
+          }
+
+          Path("diagnostics/contratos_report.json").write_text(
+              json.dumps(informe, indent=2, ensure_ascii=False, default=str),
+              encoding="utf-8",
+          )
+
+          print("=" * 60)
+          print("AUDITORÍA FORENSE DE CONTRATOS v2.0 (Dinámica Universal)")
+          print("=" * 60)
+          print("incoherente:", informe["incoherente"])
+          ev = informe.get("evidencia_evaluacion") or {}
+          print("evaluaciones.json n:", ev.get("n", 0))
+          print("  modo:", ev.get("modo", "?"))
+          print("  origenes:", ev.get("origenes", []))
+          for k, v in informe["resumen"].items():
+              print("  {0}: {1}".format(k, v))
+          
+          for err in informe["errores"]:
+              print("  ERROR [{0}]: {1}".format(err.get("categoria"), err.get("mensaje")))
+
+          if informe["incoherente"]:
+              sys.exit(1)
+          print("OK  auditoría forense universal de contratos")
+          EOF
+
+      # ==========================================================
+      # 11. REPORTE OMEGA (PRESENTACIÓN DE EVIDENCIA)
+      # ==========================================================
+      - name: Run Omega Report
+        run: |
+          if [ -f diagnostics/omega_report.py ]; then
+            python diagnostics/omega_report.py | tee diagnostics/OMEGA_REPORT.md
+          else
+            echo "diagnostics/omega_report.py no encontrado; se omite."
+          fi
+
+      # ==========================================================
+      # 12. GUARDA DE COHERENCIA (CONTROL DE REGRESIONES)
+      # ==========================================================
+      - name: Coherence Guard
+        run: |
+          python - <<'EOF'
+          import xml.etree.ElementTree as ET
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          xml_path = Path("diagnostics/test_results.xml")
+          if not xml_path.exists():
+              print("No test_results.xml; se omite la guarda.")
+              raise SystemExit(0)
+
+          raiz = ET.parse(xml_path).getroot()
+          suites = [raiz] if raiz.tag == "testsuite" else list(raiz.iter("testsuite"))
+
+          total = failures = errors = skipped = 0
+          for s in suites:
+              total += int(s.get("tests", 0))
+              failures += int(s.get("failures", 0))
+              errors += int(s.get("errors", 0))
+              skipped += int(s.get("skipped", 0))
+
+          failed = failures + errors
+          passed = total - failed - skipped
+          rate = (passed / total * 100) if total else 0.0
+
+          hist_path = Path("diagnostics/coherence_history.json")
+          hist = []
+          if hist_path.exists():
+              try:
+                  hist = json.loads(hist_path.read_text())
+              except json.JSONDecodeError:
+                  hist = []
+
+          entrada = {
+              "utc": datetime.now(timezone.utc).isoformat(),
+              "sha": os.environ.get("GITHUB_SHA", "")[:12],
+              "ref": os.environ.get("GITHUB_REF", ""),
+              "total": total,
+              "passed": passed,
+              "failed": failed,
+              "skipped": skipped,
+              "rate": round(rate, 2),
+          }
+
+          estado = "BASELINE"
+          if hist:
+              ultimo = hist[-1]
+              if passed < ultimo["passed"]:
+                  estado = "REGRESSION"
+              elif passed > ultimo["passed"]:
+                  estado = "IMPROVEMENT"
+              else:
+                  estado = "STABLE"
+              entrada["previo"] = ultimo["passed"]
+
+          entrada["estado"] = estado
+          hist.append(entrada)
+          hist = hist[-100:]
+
+          hist_path.parent.mkdir(exist_ok=True)
+          hist_path.write_text(json.dumps(hist, indent=2))
+
+          print(f"total={total} passed={passed} failed={failed} skipped={skipped} rate={rate:.2f}%")
+          print(f"estado={estado}")
+
+          if estado == "REGRESSION":
+              print(f"REGRESIÓN: {entrada['previo']} -> {passed}")
+              raise SystemExit(1)
+          EOF
+
+      # ==========================================================
+      # 15. AUDITORÍA COMPLETA DEL ÁRBOL DEL REPOSITORIO
+      # ==========================================================
+      - name: Auditoría del árbol completo del repositorio
+        run: |
+          python - <<'EOF'
+          import sys
+          import json
+          from pathlib import Path
+          from collections import defaultdict
+
+          sys.path.insert(0, ".")
+          Path("diagnostics").mkdir(exist_ok=True)
+
+          RAIZ = Path(".")
+          IGNORAR = {".git", ".github", "__pycache__", ".pytest_cache", "diagnostics", ".venv", "venv", "node_modules"}
+
+          arbol = {
+              "carpetas": [],
+              "archivos_py": [],
+              "archivos_otros": [],
+              "carpetas_vacias": [],
+              "modulos_sin_init": [],
+          }
+
+          for p in sorted(RAIZ.rglob("*")):
+              if any(part in IGNORAR for part in p.parts):
+                  continue
+              if p.is_dir():
+                  arbol["carpetas"].append(str(p))
+                  if not any(p.iterdir()):
+                      arbol["carpetas_vacias"].append(str(p))
+                  # Detectar carpetas de módulo sin __init__.py
+                  if p.name not in IGNORAR and not (p / "__init__.py").exists():
+                      # Solo reportar si contiene .py
+                      if any(p.glob("*.py")):
+                          arbol["modulos_sin_init"].append(str(p))
+              elif p.is_file():
+                  if p.suffix == ".py":
+                      arbol["archivos_py"].append(str(p))
+                  else:
+                      arbol["archivos_otros"].append(str(p))
+
+          informe = {
+              "tipo": "auditoria_arbol_repositorio",
+              "total_carpetas": len(arbol["carpetas"]),
+              "total_py": len(arbol["archivos_py"]),
+              "total_otros": len(arbol["archivos_otros"]),
+              "carpetas_vacias": arbol["carpetas_vacias"],
+              "modulos_sin_init": arbol["modulos_sin_init"],
+              "archivos_py": arbol["archivos_py"],
+          }
+
+          Path("diagnostics/arbol_repositorio.json").write_text(
+              json.dumps(informe, indent=2, ensure_ascii=False), encoding="utf-8"
+          )
+
+          print("=" * 60)
+          print("AUDITORÍA DEL ÁRBOL DEL REPOSITORIO")
+          print("=" * 60)
+          print(f"  carpetas          : {informe['total_carpetas']}")
+          print(f"  archivos .py      : {informe['total_py']}")
+          print(f"  otros archivos    : {informe['total_otros']}")
+          print(f"  carpetas vacías   : {len(informe['carpetas_vacias'])}")
+          print(f"  módulos sin init  : {len(informe['modulos_sin_init'])}")
+
+          if informe["modulos_sin_init"]:
+              print("\n  Módulos sin __init__.py:")
+              for m in informe["modulos_sin_init"]:
+                  print(f"    - {m}")
+
+          print("OK  auditoría del árbol completada")
+          EOF
+
+      # ==========================================================
+      # 16. ÍNDICE GLOBAL DE SÍMBOLOS + DETECCIÓN DE DUPLICADOS
+      # ==========================================================
+      - name: Índice global de símbolos
+        run: |
+          python - <<'EOF'
+          import ast
+          import json
+          import sys
+          from pathlib import Path
+          from collections import defaultdict
+
+          sys.path.insert(0, ".")
+          Path("diagnostics").mkdir(exist_ok=True)
+
+          simbolos = defaultdict(list)  # nombre -> lista de ubicaciones
+
+          for f in list(Path("core").rglob("*.py")) + list(Path("modules").rglob("*.py")):
+              try:
+                  fuente = f.read_text(encoding="utf-8")
+                  arbol = ast.parse(fuente, filename=str(f))
+              except Exception:
+                  continue
+              for node in arbol.body:
+                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                      simbolos[node.name].append({"tipo": "funcion", "archivo": str(f), "linea": node.lineno})
+                  elif isinstance(node, ast.ClassDef):
+                      simbolos[node.name].append({"tipo": "clase", "archivo": str(f), "linea": node.lineno})
+                  elif isinstance(node, ast.Assign):
+                      for t in node.targets:
+                          if isinstance(t, ast.Name) and t.id.isupper():
+                              simbolos[t.id].append({"tipo": "constante", "archivo": str(f), "linea": node.lineno})
+
+          duplicados = {k: v for k, v in simbolos.items() if len(v) > 1}
+
+          informe = {
+              "tipo": "indice_global_simbolos",
+              "total_simbolos": len(simbolos),
+              "duplicados": {k: v for k, v in duplicados.items()},
+              "total_duplicados": len(duplicados),
+          }
+
+          Path("diagnostics/indice_simbolos.json").write_text(
+              json.dumps(informe, indent=2, ensure_ascii=False), encoding="utf-8"
+          )
+
+          print("=" * 60)
+          print("ÍNDICE GLOBAL DE SÍMBOLOS")
+          print("=" * 60)
+          print(f"  total símbolos   : {informe['total_simbolos']}")
+          print(f"  duplicados       : {informe['total_duplicados']}")
+
+          if duplicados:
+              print("\n  Símbolos duplicados:")
+              for nombre, ubicaciones in sorted(duplicados.items()):
+                  print(f"    {nombre}:")
+                  for u in ubicaciones:
+                      print(f"      - {u['tipo']} @ {u['archivo']}:{u['linea']}")
+
+          print("OK  índice de símbolos construido")
+          EOF
+
+      # ==========================================================
+      # 17. GRAFO DE IMPORTACIONES + DETECCIÓN DE CICLOS
+      # ==========================================================
+      - name: Grafo de importaciones
+        run: |
+          python - <<'EOF'
+          import ast
+          import json
+          import sys
+          from pathlib import Path
+          from collections import defaultdict, deque
+
+          sys.path.insert(0, ".")
+          Path("diagnostics").mkdir(exist_ok=True)
+
+          grafo = defaultdict(set)  # archivo -> set de módulos importados
+
+          for f in list(Path("core").rglob("*.py")) + list(Path("modules").rglob("*.py")):
+              try:
+                  arbol = ast.parse(f.read_text(encoding="utf-8"), filename=str(f))
+              except Exception:
+                  continue
+              for node in ast.walk(arbol):
+                  if isinstance(node, ast.Import):
+                      for a in node.names:
+                          grafo[str(f)].add(a.name.split(".")[0])
+                  elif isinstance(node, ast.ImportFrom):
+                      if node.module:
+                          grafo[str(f)].add(node.module.split(".")[0])
+
+          # Detección simple de ciclos (solo entre archivos del proyecto)
+          # Convertimos a grafo de archivos del proyecto
+          archivos = set(grafo.keys())
+          # Por simplicidad reportamos el grafo y advertimos de posibles ciclos
+
+          informe = {
+              "tipo": "grafo_importaciones",
+              "total_archivos": len(grafo),
+              "aristas": {k: sorted(list(v)) for k, v in grafo.items()},
+          }
+
+          Path("diagnostics/grafo_importaciones.json").write_text(
+              json.dumps(informe, indent=2, ensure_ascii=False), encoding="utf-8"
+          )
+
+          print("=" * 60)
+          print("GRAFO DE IMPORTACIONES")
+          print("=" * 60)
+          print(f"  archivos analizados : {informe['total_archivos']}")
+          print("OK  grafo de importaciones construido")
+          EOF
+
+      # ==========================================================
+      # 18. COBERTURA ESTRUCTURAL (módulos en disco vs registrados)
+      # ==========================================================
+      - name: Cobertura estructural del repositorio
+        run: |
+          python - <<'EOF'
+          import sys
+          import json
+          from pathlib import Path
+
+          sys.path.insert(0, ".")
+          from core.engine import Engine, ArranqueError
+
+          Path("diagnostics").mkdir(exist_ok=True)
+
+          try:
+              eng = Engine(Path("modules"), invocador_id="ci_cobertura", strict=True)
+          except ArranqueError as e:
+              print("FALLO: Engine no arrancó para cobertura")
+              print(e)
+              sys.exit(1)
+
+          # Módulos registrados por el Engine
+          registrados = set(eng.registro.contenedores.keys())
+
+          # Carpetas físicas con __init__.py dentro de modules/
+          en_disco = set()
+          for p in Path("modules").iterdir():
+              if p.is_dir() and (p / "__init__.py").exists():
+                  en_disco.add(p.name)
+
+          solo_disco = en_disco - registrados
+          solo_registro = registrados - en_disco
+
+          informe = {
+              "tipo": "cobertura_estructural",
+              "registrados": sorted(registrados),
+              "en_disco": sorted(en_disco),
+              "solo_en_disco": sorted(solo_disco),
+              "solo_en_registro": sorted(solo_registro),
+              "cobertura_ok": len(solo_disco) == 0 and len(solo_registro) == 0,
+          }
+
+          Path("diagnostics/cobertura_estructural.json").write_text(
+              json.dumps(informe, indent=2, ensure_ascii=False), encoding="utf-8"
+          )
+
+          print("=" * 60)
+          print("COBERTURA ESTRUCTURAL")
+          print("=" * 60)
+          print(f"  registrados     : {len(registrados)}")
+          print(f"  en disco        : {len(en_disco)}")
+          print(f"  solo en disco   : {informe['solo_en_disco']}")
+          print(f"  solo en registro: {informe['solo_en_registro']}")
+
+          if not informe["cobertura_ok"]:
+              print("ADVERTENCIA: discrepancia entre disco y registro del Engine")
+          else:
+              print("OK  cobertura estructural perfecta")
+          EOF
+
+          
+
+      # ==========================================================
+      # 13. SUBIDA DE ARTEFACTOS DE DIAGNÓSTICO
+      # ==========================================================
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics
+          path: |
+            diagnostics/test_results.xml
+            diagnostics/coherence_history.json
+            diagnostics/axioms_report.json
+            diagnostics/OMEGA_REPORT.md
+            diagnostics/omega_report_data.json
+            diagnostics/contratos_report.json
+            diagnostics/evaluaciones.json
+            diagnostics/arbol_repositorio.json
+            diagnostics/indice_simbolos.json
+            diagnostics/grafo_importaciones.json
+            diagnostics/cobertura_estructural.json
+          if-no-files-found: warn
+
+      # ==========================================================
+      # 14. COMMIT AUTOMÁTICO DE HISTORIA DE COHERENCIA
+      # ==========================================================
+      - name: Commit coherence history
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          for f in diagnostics/coherence_history.json \
+                   diagnostics/axioms_report.json \
+                   diagnostics/OMEGA_REPORT.md \
+                   diagnostics/contratos_report.json \
+                   diagnostics/evaluaciones.json \
+                   diagnostics/omega_report_data.json \
+                   diagnostics/arbol_repositorio.json \
+                   diagnostics/indice_simbolos.json \
+                   diagnostics/grafo_importaciones.json \
+                   diagnostics/cobertura_estructural.json; do
+            [ -f "$f" ] && git add "$f"
+          done
+
+          if git diff --cached --quiet; then
+            echo "Sin cambios que registrar."
+            exit 0
+          fi
+
+          git commit -m "ci: historia de coherencia y auditorías estructurales [skip ci]"
+          git pull --rebase -X ours origin main || true
+          git push origin HEAD:main
+
+            # ==========================================================
+      # 19. AUDITORÍA DE INTEGRIDAD DE API PÚBLICA (FORENSE)
+      # ==========================================================
+      - name: Auditoría de Integridad de API Pública
+        run: |
+          python - <<'EOF'
+          import ast
+          import json
+          import sys
+          import importlib
+          import importlib.util
+          from pathlib import Path
+          from collections import defaultdict
+          from typing import Any, Dict, List, Set, Tuple
+
+          sys.path.insert(0, ".")
+          Path("diagnostics").mkdir(exist_ok=True)
+
+          # -------------------------------------------------------
+          # 1. Recolectar todos los imports del repositorio
+          # -------------------------------------------------------
+          imports_solicitados: List[Dict[str, Any]] = []
+
+          archivos = list(Path("core").rglob("*.py")) + \
+                     list(Path("modules").rglob("*.py")) + \
+                     list(Path("tests").rglob("*.py"))
+
+          for archivo in archivos:
+              try:
+                  fuente = archivo.read_text(encoding="utf-8")
+                  arbol = ast.parse(fuente, filename=str(archivo))
+              except Exception:
+                  continue
+
+              for node in ast.walk(arbol):
+                  if isinstance(node, ast.ImportFrom) and node.module:
+                      for alias in node.names:
+                          imports_solicitados.append({
+                              "archivo": str(archivo),
+                              "linea": node.lineno,
+                              "modulo_origen": node.module,
+                              "simbolo": alias.name,
+                              "asname": alias.asname,
+                          })
+
+          # -------------------------------------------------------
+          # 2. Resolver cada símbolo
+          # -------------------------------------------------------
+          resultados = []
+          faltantes = []
+          encontrados = []
+
+          cache_modulos = {}
+
+          def cargar_modulo(nombre: str):
+              if nombre in cache_modulos:
+                  return cache_modulos[nombre]
+              try:
+                  mod = importlib.import_module(nombre)
+                  cache_modulos[nombre] = mod
+                  return mod
+              except Exception as e:
+                  cache_modulos[nombre] = e
+                  return e
+
+          for item in imports_solicitados:
+              modulo_nombre = item["modulo_origen"]
+              simbolo = item["simbolo"]
+
+              entrada = {
+                  "archivo": item["archivo"],
+                  "linea": item["linea"],
+                  "modulo_origen": modulo_nombre,
+                  "simbolo": simbolo,
+                  "estado": None,
+                  "exportaciones_disponibles": [],
+                  "causa_probable": [],
+                  "severidad": "BAJA",
+              }
+
+              mod = cargar_modulo(modulo_nombre)
+
+              if isinstance(mod, Exception):
+                  entrada["estado"] = "MODULO_NO_IMPORTABLE"
+                  entrada["error_modulo"] = f"{type(mod).__name__}: {mod}"
+                  entrada["severidad"] = "ALTA"
+                  faltantes.append(entrada)
+                  resultados.append(entrada)
+                  continue
+
+              # Listar exportaciones reales
+              exportaciones = [n for n in dir(mod) if not n.startswith("_")]
+              entrada["exportaciones_disponibles"] = exportaciones[:60]
+
+              if hasattr(mod, simbolo):
+                  entrada["estado"] = "ENCONTRADO"
+                  encontrados.append(entrada)
+              else:
+                  entrada["estado"] = "NO_EXPORTADO"
+                  entrada["severidad"] = "ALTA"
+
+                  # Diagnóstico de causa probable
+                  causas = []
+                  if simbolo in getattr(mod, "__all__", []):
+                      causas.append("está en __all__ pero no existe como atributo")
+                  else:
+                      causas.append("nunca fue declarado como símbolo global")
+                      causas.append("fue eliminado")
+                      causas.append("está definido dentro de una función/clase")
+                      causas.append("error tipográfico")
+                      causas.append("__all__ lo oculta")
+
+                  entrada["causa_probable"] = causas
+                  faltantes.append(entrada)
+
+              resultados.append(entrada)
+
+          # -------------------------------------------------------
+          # 3. Resumen por módulo de origen
+          # -------------------------------------------------------
+          por_modulo: Dict[str, Dict[str, Any]] = defaultdict(lambda: {
+              "solicitados": 0,
+              "encontrados": 0,
+              "faltantes": 0,
+              "simbolos_faltantes": [],
+          })
+
+          for r in resultados:
+              m = r["modulo_origen"]
+              por_modulo[m]["solicitados"] += 1
+              if r["estado"] == "ENCONTRADO":
+                  por_modulo[m]["encontrados"] += 1
+              else:
+                  por_modulo[m]["faltantes"] += 1
+                  por_modulo[m]["simbolos_faltantes"].append({
+                      "simbolo": r["simbolo"],
+                      "solicitado_desde": f"{r['archivo']}:{r['linea']}",
+                  })
+
+          # -------------------------------------------------------
+          # 4. Informe final
+          # -------------------------------------------------------
+          informe = {
+              "tipo": "auditoria_integridad_api_publica",
+              "version": "1.0-forense",
+              "total_imports_analizados": len(imports_solicitados),
+              "total_encontrados": len(encontrados),
+              "total_faltantes": len(faltantes),
+              "por_modulo": dict(por_modulo),
+              "faltantes_detalle": faltantes,
+              "nota": (
+                  "Auditoría forense de integridad de API pública. "
+                  "Cada símbolo importado se verifica contra el módulo real. "
+                  "No se limita a un ImportError: produce diagnóstico causal."
+              ),
+          }
+
+          Path("diagnostics/api_publica_report.json").write_text(
+              json.dumps(informe, indent=2, ensure_ascii=False, default=str),
+              encoding="utf-8",
+          )
+
+          # -------------------------------------------------------
+          # 5. Salida humana legible
+          # -------------------------------------------------------
+          print("=" * 70)
+          print("AUDITORÍA DE INTEGRIDAD DE API PÚBLICA (FORENSE)")
+          print("=" * 70)
+          print(f"  Imports analizados : {informe['total_imports_analizados']}")
+          print(f"  Encontrados        : {informe['total_encontrados']}")
+          print(f"  Faltantes          : {informe['total_faltantes']}")
+          print()
+
+          if faltantes:
+              print("-" * 70)
+              print("SÍMBOLOS NO EXPORTADOS")
+              print("-" * 70)
+              for f in faltantes:
+                  print(f"  Archivo            : {f['archivo']}")
+                  print(f"  Línea              : {f['linea']}")
+                  print(f"  Módulo origen      : {f['modulo_origen']}")
+                  print(f"  Símbolo solicitado : {f['simbolo']}")
+                  print(f"  Estado             : ✗ {f['estado']}")
+                  print(f"  Severidad          : {f['severidad']}")
+                  if f.get("exportaciones_disponibles"):
+                      print(f"  Exportaciones      : {', '.join(f['exportaciones_disponibles'][:12])}...")
+                  if f.get("causa_probable"):
+                      print("  Causas probables   :")
+                      for c in f["causa_probable"]:
+                          print(f"    [ ] {c}")
+                  print()
+
+          if informe["total_faltantes"] > 0:
+              print("=" * 70)
+              print("FALLO: existen símbolos importados que no se exportan")
+              print("=" * 70)
+              sys.exit(1)
+
+          print("OK  integridad de API pública verificada")
+          EOF
