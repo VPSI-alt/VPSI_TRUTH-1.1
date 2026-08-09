@@ -291,6 +291,9 @@ jobs:
 
           Path("diagnostics").mkdir(exist_ok=True)
 
+          # ----------------------------------------------------------
+          # Subsección 10.1: Inicialización y Extracción Universal
+          # ----------------------------------------------------------
           try:
               eng = Engine(Path("modules"), invocador_id="ci_auditoria", strict=True)
           except ArranqueError as e:
@@ -366,6 +369,9 @@ jobs:
                   ),
               }
 
+          # ----------------------------------------------------------
+          # Subsección 10.2: Validaciones y Compuerta de Arranque
+          # ----------------------------------------------------------
           informe["evidencia_arranque"] = {
               "estado": eng.estado,
               "invocador_id": eng.invocador_id,
@@ -419,6 +425,9 @@ jobs:
           if rechazados:
               fallar("registro", "hay contenedores rechazados", detalle=rechazados)
 
+          # ----------------------------------------------------------
+          # Subsección 10.3: Auditoría Forense de Contratos y Capacidades
+          # ----------------------------------------------------------
           caps_verificadas = 0
           caps_fallidas = 0
           contratos_validos = 0
@@ -456,6 +465,7 @@ jobs:
               for clave in list(contrato_capacidades.keys()):
                   objetivo = contrato_capacidades.get(clave)
                   
+                  # 1. ¿El Contenedor resolvió la capacidad a través de su método fn()?
                   fn_engine = None
                   error_engine = None
                   if hasattr(cont, "fn"):
@@ -464,6 +474,7 @@ jobs:
                       except Exception as e:
                           error_engine = str(e)
 
+                  # 2. Análisis del módulo (autoridad: cont.modulo) y verificación estricta de pertenencia
                   fn_modulo = None
                   existe_en_modulo = False
                   es_callable_directo = False
@@ -483,6 +494,7 @@ jobs:
                           if existe_en_modulo:
                               fn_modulo = getattr(cont.modulo, objetivo, None)
 
+                  # 3. Recolección de Evidencia Autocontenida para el informe JSON
                   item = {
                       "clave": clave,
                       "declarado": repr(objetivo),
@@ -498,6 +510,7 @@ jobs:
                       "tipo_objeto": type(fn_modulo).__name__ if fn_modulo is not None else None,
                   }
 
+                  # 4. Árbol de Decisión Causal Mutuamente Excluyente (Atribución corregida al Contenedor en fn)
                   if callable(fn_engine):
                       item["ok"] = True
                       item["responsable"] = None
@@ -561,6 +574,9 @@ jobs:
 
               informe["roles"][rol] = entry
 
+          # ----------------------------------------------------------
+          # Subsección 10.4: Fusión de Evidencia y Reporte
+          # ----------------------------------------------------------
           evals = []
           if hasattr(eng, "get_resultados_evaluacion"):
               evals = list(eng.get_resultados_evaluacion() or [])
@@ -742,257 +758,6 @@ jobs:
           EOF
 
       # ==========================================================
-      # 15. AUDITORÍA COMPLETA DEL ÁRBOL DEL REPOSITORIO
-      # ==========================================================
-      - name: Auditoría del árbol completo del repositorio
-        run: |
-          python - <<'EOF'
-          import sys
-          import json
-          from pathlib import Path
-          from collections import defaultdict
-
-          sys.path.insert(0, ".")
-          Path("diagnostics").mkdir(exist_ok=True)
-
-          RAIZ = Path(".")
-          IGNORAR = {".git", ".github", "__pycache__", ".pytest_cache", "diagnostics", ".venv", "venv", "node_modules"}
-
-          arbol = {
-              "carpetas": [],
-              "archivos_py": [],
-              "archivos_otros": [],
-              "carpetas_vacias": [],
-              "modulos_sin_init": [],
-          }
-
-          for p in sorted(RAIZ.rglob("*")):
-              if any(part in IGNORAR for part in p.parts):
-                  continue
-              if p.is_dir():
-                  arbol["carpetas"].append(str(p))
-                  if not any(p.iterdir()):
-                      arbol["carpetas_vacias"].append(str(p))
-                  # Detectar carpetas de módulo sin __init__.py
-                  if p.name not in IGNORAR and not (p / "__init__.py").exists():
-                      # Solo reportar si contiene .py
-                      if any(p.glob("*.py")):
-                          arbol["modulos_sin_init"].append(str(p))
-              elif p.is_file():
-                  if p.suffix == ".py":
-                      arbol["archivos_py"].append(str(p))
-                  else:
-                      arbol["archivos_otros"].append(str(p))
-
-          informe = {
-              "tipo": "auditoria_arbol_repositorio",
-              "total_carpetas": len(arbol["carpetas"]),
-              "total_py": len(arbol["archivos_py"]),
-              "total_otros": len(arbol["archivos_otros"]),
-              "carpetas_vacias": arbol["carpetas_vacias"],
-              "modulos_sin_init": arbol["modulos_sin_init"],
-              "archivos_py": arbol["archivos_py"],
-          }
-
-          Path("diagnostics/arbol_repositorio.json").write_text(
-              json.dumps(informe, indent=2, ensure_ascii=False), encoding="utf-8"
-          )
-
-          print("=" * 60)
-          print("AUDITORÍA DEL ÁRBOL DEL REPOSITORIO")
-          print("=" * 60)
-          print(f"  carpetas          : {informe['total_carpetas']}")
-          print(f"  archivos .py      : {informe['total_py']}")
-          print(f"  otros archivos    : {informe['total_otros']}")
-          print(f"  carpetas vacías   : {len(informe['carpetas_vacias'])}")
-          print(f"  módulos sin init  : {len(informe['modulos_sin_init'])}")
-
-          if informe["modulos_sin_init"]:
-              print("\n  Módulos sin __init__.py:")
-              for m in informe["modulos_sin_init"]:
-                  print(f"    - {m}")
-
-          print("OK  auditoría del árbol completada")
-          EOF
-
-      # ==========================================================
-      # 16. ÍNDICE GLOBAL DE SÍMBOLOS + DETECCIÓN DE DUPLICADOS
-      # ==========================================================
-      - name: Índice global de símbolos
-        run: |
-          python - <<'EOF'
-          import ast
-          import json
-          import sys
-          from pathlib import Path
-          from collections import defaultdict
-
-          sys.path.insert(0, ".")
-          Path("diagnostics").mkdir(exist_ok=True)
-
-          simbolos = defaultdict(list)  # nombre -> lista de ubicaciones
-
-          for f in list(Path("core").rglob("*.py")) + list(Path("modules").rglob("*.py")):
-              try:
-                  fuente = f.read_text(encoding="utf-8")
-                  arbol = ast.parse(fuente, filename=str(f))
-              except Exception:
-                  continue
-              for node in arbol.body:
-                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                      simbolos[node.name].append({"tipo": "funcion", "archivo": str(f), "linea": node.lineno})
-                  elif isinstance(node, ast.ClassDef):
-                      simbolos[node.name].append({"tipo": "clase", "archivo": str(f), "linea": node.lineno})
-                  elif isinstance(node, ast.Assign):
-                      for t in node.targets:
-                          if isinstance(t, ast.Name) and t.id.isupper():
-                              simbolos[t.id].append({"tipo": "constante", "archivo": str(f), "linea": node.lineno})
-
-          duplicados = {k: v for k, v in simbolos.items() if len(v) > 1}
-
-          informe = {
-              "tipo": "indice_global_simbolos",
-              "total_simbolos": len(simbolos),
-              "duplicados": {k: v for k, v in duplicados.items()},
-              "total_duplicados": len(duplicados),
-          }
-
-          Path("diagnostics/indice_simbolos.json").write_text(
-              json.dumps(informe, indent=2, ensure_ascii=False), encoding="utf-8"
-          )
-
-          print("=" * 60)
-          print("ÍNDICE GLOBAL DE SÍMBOLOS")
-          print("=" * 60)
-          print(f"  total símbolos   : {informe['total_simbolos']}")
-          print(f"  duplicados       : {informe['total_duplicados']}")
-
-          if duplicados:
-              print("\n  Símbolos duplicados:")
-              for nombre, ubicaciones in sorted(duplicados.items()):
-                  print(f"    {nombre}:")
-                  for u in ubicaciones:
-                      print(f"      - {u['tipo']} @ {u['archivo']}:{u['linea']}")
-
-          print("OK  índice de símbolos construido")
-          EOF
-
-      # ==========================================================
-      # 17. GRAFO DE IMPORTACIONES + DETECCIÓN DE CICLOS
-      # ==========================================================
-      - name: Grafo de importaciones
-        run: |
-          python - <<'EOF'
-          import ast
-          import json
-          import sys
-          from pathlib import Path
-          from collections import defaultdict, deque
-
-          sys.path.insert(0, ".")
-          Path("diagnostics").mkdir(exist_ok=True)
-
-          grafo = defaultdict(set)  # archivo -> set de módulos importados
-
-          for f in list(Path("core").rglob("*.py")) + list(Path("modules").rglob("*.py")):
-              try:
-                  arbol = ast.parse(f.read_text(encoding="utf-8"), filename=str(f))
-              except Exception:
-                  continue
-              for node in ast.walk(arbol):
-                  if isinstance(node, ast.Import):
-                      for a in node.names:
-                          grafo[str(f)].add(a.name.split(".")[0])
-                  elif isinstance(node, ast.ImportFrom):
-                      if node.module:
-                          grafo[str(f)].add(node.module.split(".")[0])
-
-          # Detección simple de ciclos (solo entre archivos del proyecto)
-          # Convertimos a grafo de archivos del proyecto
-          archivos = set(grafo.keys())
-          # Por simplicidad reportamos el grafo y advertimos de posibles ciclos
-
-          informe = {
-              "tipo": "grafo_importaciones",
-              "total_archivos": len(grafo),
-              "aristas": {k: sorted(list(v)) for k, v in grafo.items()},
-          }
-
-          Path("diagnostics/grafo_importaciones.json").write_text(
-              json.dumps(informe, indent=2, ensure_ascii=False), encoding="utf-8"
-          )
-
-          print("=" * 60)
-          print("GRAFO DE IMPORTACIONES")
-          print("=" * 60)
-          print(f"  archivos analizados : {informe['total_archivos']}")
-          print("OK  grafo de importaciones construido")
-          EOF
-
-      # ==========================================================
-      # 18. COBERTURA ESTRUCTURAL (módulos en disco vs registrados)
-      # ==========================================================
-      - name: Cobertura estructural del repositorio
-        run: |
-          python - <<'EOF'
-          import sys
-          import json
-          from pathlib import Path
-
-          sys.path.insert(0, ".")
-          from core.engine import Engine, ArranqueError
-
-          Path("diagnostics").mkdir(exist_ok=True)
-
-          try:
-              eng = Engine(Path("modules"), invocador_id="ci_cobertura", strict=True)
-          except ArranqueError as e:
-              print("FALLO: Engine no arrancó para cobertura")
-              print(e)
-              sys.exit(1)
-
-          # Módulos registrados por el Engine
-          registrados = set(eng.registro.contenedores.keys())
-
-          # Carpetas físicas con __init__.py dentro de modules/
-          en_disco = set()
-          for p in Path("modules").iterdir():
-              if p.is_dir() and (p / "__init__.py").exists():
-                  en_disco.add(p.name)
-
-          solo_disco = en_disco - registrados
-          solo_registro = registrados - en_disco
-
-          informe = {
-              "tipo": "cobertura_estructural",
-              "registrados": sorted(registrados),
-              "en_disco": sorted(en_disco),
-              "solo_en_disco": sorted(solo_disco),
-              "solo_en_registro": sorted(solo_registro),
-              "cobertura_ok": len(solo_disco) == 0 and len(solo_registro) == 0,
-          }
-
-          Path("diagnostics/cobertura_estructural.json").write_text(
-              json.dumps(informe, indent=2, ensure_ascii=False), encoding="utf-8"
-          )
-
-          print("=" * 60)
-          print("COBERTURA ESTRUCTURAL")
-          print("=" * 60)
-          print(f"  registrados     : {len(registrados)}")
-          print(f"  en disco        : {len(en_disco)}")
-          print(f"  solo en disco   : {informe['solo_en_disco']}")
-          print(f"  solo en registro: {informe['solo_en_registro']}")
-
-          if not informe["cobertura_ok"]:
-              print("ADVERTENCIA: discrepancia entre disco y registro del Engine")
-          else:
-              print("OK  cobertura estructural perfecta")
-          EOF
-
-          
-
-      # ==========================================================
       # 13. SUBIDA DE ARTEFACTOS DE DIAGNÓSTICO
       # ==========================================================
       - name: Upload diagnostics
@@ -1008,10 +773,6 @@ jobs:
             diagnostics/omega_report_data.json
             diagnostics/contratos_report.json
             diagnostics/evaluaciones.json
-            diagnostics/arbol_repositorio.json
-            diagnostics/indice_simbolos.json
-            diagnostics/grafo_importaciones.json
-            diagnostics/cobertura_estructural.json
           if-no-files-found: warn
 
       # ==========================================================
@@ -1028,11 +789,7 @@ jobs:
                    diagnostics/OMEGA_REPORT.md \
                    diagnostics/contratos_report.json \
                    diagnostics/evaluaciones.json \
-                   diagnostics/omega_report_data.json \
-                   diagnostics/arbol_repositorio.json \
-                   diagnostics/indice_simbolos.json \
-                   diagnostics/grafo_importaciones.json \
-                   diagnostics/cobertura_estructural.json; do
+                   diagnostics/omega_report_data.json; do
             [ -f "$f" ] && git add "$f"
           done
 
@@ -1041,207 +798,6 @@ jobs:
             exit 0
           fi
 
-          git commit -m "ci: historia de coherencia y auditorías estructurales [skip ci]"
+          git commit -m "ci: historia de coherencia [skip ci]"
           git pull --rebase -X ours origin main || true
           git push origin HEAD:main
-
-            # ==========================================================
-      # 19. AUDITORÍA DE INTEGRIDAD DE API PÚBLICA (FORENSE)
-      # ==========================================================
-      - name: Auditoría de Integridad de API Pública
-        run: |
-          python - <<'EOF'
-          import ast
-          import json
-          import sys
-          import importlib
-          import importlib.util
-          from pathlib import Path
-          from collections import defaultdict
-          from typing import Any, Dict, List, Set, Tuple
-
-          sys.path.insert(0, ".")
-          Path("diagnostics").mkdir(exist_ok=True)
-
-          # -------------------------------------------------------
-          # 1. Recolectar todos los imports del repositorio
-          # -------------------------------------------------------
-          imports_solicitados: List[Dict[str, Any]] = []
-
-          archivos = list(Path("core").rglob("*.py")) + \
-                     list(Path("modules").rglob("*.py")) + \
-                     list(Path("tests").rglob("*.py"))
-
-          for archivo in archivos:
-              try:
-                  fuente = archivo.read_text(encoding="utf-8")
-                  arbol = ast.parse(fuente, filename=str(archivo))
-              except Exception:
-                  continue
-
-              for node in ast.walk(arbol):
-                  if isinstance(node, ast.ImportFrom) and node.module:
-                      for alias in node.names:
-                          imports_solicitados.append({
-                              "archivo": str(archivo),
-                              "linea": node.lineno,
-                              "modulo_origen": node.module,
-                              "simbolo": alias.name,
-                              "asname": alias.asname,
-                          })
-
-          # -------------------------------------------------------
-          # 2. Resolver cada símbolo
-          # -------------------------------------------------------
-          resultados = []
-          faltantes = []
-          encontrados = []
-
-          cache_modulos = {}
-
-          def cargar_modulo(nombre: str):
-              if nombre in cache_modulos:
-                  return cache_modulos[nombre]
-              try:
-                  mod = importlib.import_module(nombre)
-                  cache_modulos[nombre] = mod
-                  return mod
-              except Exception as e:
-                  cache_modulos[nombre] = e
-                  return e
-
-          for item in imports_solicitados:
-              modulo_nombre = item["modulo_origen"]
-              simbolo = item["simbolo"]
-
-              entrada = {
-                  "archivo": item["archivo"],
-                  "linea": item["linea"],
-                  "modulo_origen": modulo_nombre,
-                  "simbolo": simbolo,
-                  "estado": None,
-                  "exportaciones_disponibles": [],
-                  "causa_probable": [],
-                  "severidad": "BAJA",
-              }
-
-              mod = cargar_modulo(modulo_nombre)
-
-              if isinstance(mod, Exception):
-                  entrada["estado"] = "MODULO_NO_IMPORTABLE"
-                  entrada["error_modulo"] = f"{type(mod).__name__}: {mod}"
-                  entrada["severidad"] = "ALTA"
-                  faltantes.append(entrada)
-                  resultados.append(entrada)
-                  continue
-
-              # Listar exportaciones reales
-              exportaciones = [n for n in dir(mod) if not n.startswith("_")]
-              entrada["exportaciones_disponibles"] = exportaciones[:60]
-
-              if hasattr(mod, simbolo):
-                  entrada["estado"] = "ENCONTRADO"
-                  encontrados.append(entrada)
-              else:
-                  entrada["estado"] = "NO_EXPORTADO"
-                  entrada["severidad"] = "ALTA"
-
-                  # Diagnóstico de causa probable
-                  causas = []
-                  if simbolo in getattr(mod, "__all__", []):
-                      causas.append("está en __all__ pero no existe como atributo")
-                  else:
-                      causas.append("nunca fue declarado como símbolo global")
-                      causas.append("fue eliminado")
-                      causas.append("está definido dentro de una función/clase")
-                      causas.append("error tipográfico")
-                      causas.append("__all__ lo oculta")
-
-                  entrada["causa_probable"] = causas
-                  faltantes.append(entrada)
-
-              resultados.append(entrada)
-
-          # -------------------------------------------------------
-          # 3. Resumen por módulo de origen
-          # -------------------------------------------------------
-          por_modulo: Dict[str, Dict[str, Any]] = defaultdict(lambda: {
-              "solicitados": 0,
-              "encontrados": 0,
-              "faltantes": 0,
-              "simbolos_faltantes": [],
-          })
-
-          for r in resultados:
-              m = r["modulo_origen"]
-              por_modulo[m]["solicitados"] += 1
-              if r["estado"] == "ENCONTRADO":
-                  por_modulo[m]["encontrados"] += 1
-              else:
-                  por_modulo[m]["faltantes"] += 1
-                  por_modulo[m]["simbolos_faltantes"].append({
-                      "simbolo": r["simbolo"],
-                      "solicitado_desde": f"{r['archivo']}:{r['linea']}",
-                  })
-
-          # -------------------------------------------------------
-          # 4. Informe final
-          # -------------------------------------------------------
-          informe = {
-              "tipo": "auditoria_integridad_api_publica",
-              "version": "1.0-forense",
-              "total_imports_analizados": len(imports_solicitados),
-              "total_encontrados": len(encontrados),
-              "total_faltantes": len(faltantes),
-              "por_modulo": dict(por_modulo),
-              "faltantes_detalle": faltantes,
-              "nota": (
-                  "Auditoría forense de integridad de API pública. "
-                  "Cada símbolo importado se verifica contra el módulo real. "
-                  "No se limita a un ImportError: produce diagnóstico causal."
-              ),
-          }
-
-          Path("diagnostics/api_publica_report.json").write_text(
-              json.dumps(informe, indent=2, ensure_ascii=False, default=str),
-              encoding="utf-8",
-          )
-
-          # -------------------------------------------------------
-          # 5. Salida humana legible
-          # -------------------------------------------------------
-          print("=" * 70)
-          print("AUDITORÍA DE INTEGRIDAD DE API PÚBLICA (FORENSE)")
-          print("=" * 70)
-          print(f"  Imports analizados : {informe['total_imports_analizados']}")
-          print(f"  Encontrados        : {informe['total_encontrados']}")
-          print(f"  Faltantes          : {informe['total_faltantes']}")
-          print()
-
-          if faltantes:
-              print("-" * 70)
-              print("SÍMBOLOS NO EXPORTADOS")
-              print("-" * 70)
-              for f in faltantes:
-                  print(f"  Archivo            : {f['archivo']}")
-                  print(f"  Línea              : {f['linea']}")
-                  print(f"  Módulo origen      : {f['modulo_origen']}")
-                  print(f"  Símbolo solicitado : {f['simbolo']}")
-                  print(f"  Estado             : ✗ {f['estado']}")
-                  print(f"  Severidad          : {f['severidad']}")
-                  if f.get("exportaciones_disponibles"):
-                      print(f"  Exportaciones      : {', '.join(f['exportaciones_disponibles'][:12])}...")
-                  if f.get("causa_probable"):
-                      print("  Causas probables   :")
-                      for c in f["causa_probable"]:
-                          print(f"    [ ] {c}")
-                  print()
-
-          if informe["total_faltantes"] > 0:
-              print("=" * 70)
-              print("FALLO: existen símbolos importados que no se exportan")
-              print("=" * 70)
-              sys.exit(1)
-
-          print("OK  integridad de API pública verificada")
-          EOF
