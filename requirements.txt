@@ -14,7 +14,22 @@
 #   pathlib         paths                                     stdlib
 #   dataclasses     contracts                                 stdlib
 #   traceback       isolated failure reporting                stdlib
+#   hmac            constant-time compare                     stdlib
+#   secrets         (reserved; not used for sampling Tru)     stdlib
+#
+# Optional domain dependencies (not required by Engine core):
+#
+#   cryptography    SC / spartaco_seguridad
+#                   Ed25519 signatures, AES-256-GCM, scrypt
+#                   Used only by modules/spartaco_seguridad/*
+#                   If absent: SC resource load fails closed;
+#                   Engine remains operational without SC crypto.
 #
 # ======================================================================
 
+# --- tests ---
 pytest==8.3.4
+
+# --- SC / spartaco_seguridad (proteccion.py) ---
+# Pin major for API stability of hazmat primitives.
+cryptography>=42.0.0,<46.0.0
