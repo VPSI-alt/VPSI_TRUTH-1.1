@@ -55,7 +55,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from core.centinela import Centinela, Veredicto
-from core.paquete_contrato import PKG_CICLO_ID
 
 
 # ===============================================================
