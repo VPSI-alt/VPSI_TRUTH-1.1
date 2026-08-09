@@ -66,6 +66,7 @@ VERSION_ENGINE = "18.3"
 ESQUEMA_CONTRATO_REQUERIDO = "VPSI-CONTRACT-1.0"
 VERSION_CONTRATO_REQUERIDA = "1.0"
 API_ENGINE_ACTUAL = "1.0"
+PKG_CICLO_ID = "ciclo_id"  # Constante faltante
 
 
 # ===============================================================
@@ -504,340 +505,180 @@ class Engine:
             return []
         return [p for p in sorted(self.raiz.iterdir()) if p.is_dir() and (p / "__init__.py").is_file()]
 
-# ===========================================================
-# FIN DESCUBRIMIENTO
-# ===========================================================
+    # ===========================================================
+    # LECTURA DEL CONTRATO
+    # ===========================================================
 
-# ===========================================================
-# LECTURA DEL CONTRATO
-# ===========================================================
+    def _leer_contrato(self, path_dir: Path) -> Optional[Dict[str, Any]]:
+        init_path = path_dir / "__init__.py"
+        nombre_mod = f"vpsi_dinamico_{path_dir.name}"
 
-def _leer_contrato(self, path_dir: Path) -> Optional[Dict[str, Any]]:
-    init_path = path_dir / "__init__.py"
-    nombre_mod = f"vpsi_dinamico_{path_dir.name}"
+        try:
+            spec = importlib.util.spec_from_file_location(nombre_mod, init_path, submodule_search_locations=[str(path_dir)])
+            if spec is None or spec.loader is None:
+                return None
 
-    try:
-        spec = importlib.util.spec_from_file_location(nombre_mod, init_path, submodule_search_locations=[str(path_dir)])
-        if spec is None or spec.loader is None:
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[nombre_mod] = mod
+            spec.loader.exec_module(mod)
+
+            meta = getattr(mod, "CONTENEDOR", None)
+            if not isinstance(meta, dict):
+                self.errores_arranque.append(f"{path_dir.name}: CONTENEDOR ausente o no es dict")
+                return None
+
+            return {
+                "meta": meta,
+                "modulo": mod,
+                "ruta": init_path,
+                "nombre_carpeta": path_dir.name,
+            }
+
+        except Exception as e:
+            self.errores_arranque.append(f"{path_dir.name}: error al cargar → {type(e).__name__}: {e}")
             return None
 
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules[nombre_mod] = mod
-        spec.loader.exec_module(mod)
+    # ===========================================================
+    # VALIDACIÓN DE LISTAS STR
+    # ===========================================================
 
-        meta = getattr(mod, "CONTENEDOR", None)
-        if not isinstance(meta, dict):
-            self.errores_arranque.append(f"{path_dir.name}: CONTENEDOR ausente o no es dict")
-            return None
+    def _validar_lista_str(
+        self,
+        meta: Dict[str, Any],
+        clave: str,
+        nombre: str,
+    ) -> List[str]:
 
-        return {
-            "meta": meta,
-            "modulo": mod,
-            "ruta": init_path,
-            "nombre_carpeta": path_dir.name,
-        }
+        errores: List[str] = []
+        val = meta.get(clave)
 
-    except Exception as e:
-        self.errores_arranque.append(f"{path_dir.name}: error al cargar → {type(e).__name__}: {e}")
-        return None
+        if not isinstance(val, list):
+            errores.append(
+                f"{nombre}: '{clave}' debe ser list"
+            )
+            return errores
 
-# ===========================================================
-# FIN LECTURA DEL CONTRATO
-# ===========================================================
+        for i, item in enumerate(val):
+            if not isinstance(item, str):
+                errores.append(
+                    f"{nombre}: '{clave}[{i}]' debe ser str, "
+                    f"es {type(item).__name__}"
+                )
 
-
-
-# ===========================================================
-# VALIDACIÓN DE LISTAS STR
-# ===========================================================
-
-def _validar_lista_str(
-    self,
-    meta: Dict[str, Any],
-    clave: str,
-    nombre: str,
-) -> List[str]:
-
-    errores: List[str] = []
-    val = meta.get(clave)
-
-    if not isinstance(val, list):
-        errores.append(
-            f"{nombre}: '{clave}' debe ser list"
-        )
         return errores
 
-    for i, item in enumerate(val):
-        if not isinstance(item, str):
-            errores.append(
-                f"{nombre}: '{clave}[{i}]' debe ser str, "
-                f"es {type(item).__name__}"
-            )
+    # ===========================================================
+    # VERSIONES
+    # ===========================================================
 
-    return errores
+    @staticmethod
+    def _parse_version(s: str) -> Optional[Tuple[int, ...]]:
+        m = re.match(r"^(\d+(?:\.\d+)*)", str(s).strip())
+        if not m:
+            return None
+        try:
+            return tuple(int(x) for x in m.group(1).split("."))
+        except ValueError:
+            return None
 
+    def _comparar_api(self, declarado: str) -> Optional[str]:
+        raw = str(declarado).strip()
+        if not raw:
+            return "api_engine vacío"
 
-# ===========================================================
-# FIN VALIDACIÓN DE LISTAS STR
-# ===========================================================
+        if raw.startswith(">="):
+            exacto, ver_str = False, raw[2:].strip()
+        else:
+            exacto, ver_str = True, raw
 
-# ===========================================================
-# VERSIONES
-# ===========================================================
+        requerida = self._parse_version(ver_str)
+        if requerida is None:
+            return f"api_engine no parseable: '{declarado}'"
 
-# -----------------------------------------------------------
-# PARSEO DE VERSIONES
-# -----------------------------------------------------------
+        actual = self._parse_version(API_ENGINE_ACTUAL)
+        if actual is None:
+            return f"API_ENGINE_ACTUAL inválida: '{API_ENGINE_ACTUAL}'"
 
-@staticmethod
-def _parse_version(s: str) -> Optional[Tuple[int, ...]]:
-    m = re.match(r"^(\d+(?:\.\d+)*)", str(s).strip())
-    if not m:
-        return None
-    try:
-        return tuple(int(x) for x in m.group(1).split("."))
-    except ValueError:
-        return None
+        n = max(len(requerida), len(actual))
+        requerida += (0,) * (n - len(requerida))
+        actual += (0,) * (n - len(actual))
 
+        if exacto and actual != requerida:
+            return f"api_engine exige exactamente {ver_str}, Engine es {API_ENGINE_ACTUAL}"
 
-# -----------------------------------------------------------
-# COMPARACIÓN DE API ENGINE
-# -----------------------------------------------------------
+        if not exacto and actual < requerida:
+            return f"api_engine exige >={ver_str}, Engine es {API_ENGINE_ACTUAL}"
 
-def _comparar_api(self, declarado: str) -> Optional[str]:
-    raw = str(declarado).strip()
-    if not raw:
-        return "api_engine vacío"
-
-    if raw.startswith(">="):
-        exacto, ver_str = False, raw[2:].strip()
-    else:
-        exacto, ver_str = True, raw
-
-    requerida = self._parse_version(ver_str)
-    if requerida is None:
-        return f"api_engine no parseable: '{declarado}'"
-
-    actual = self._parse_version(API_ENGINE_ACTUAL)
-    if actual is None:
-        return f"API_ENGINE_ACTUAL inválida: '{API_ENGINE_ACTUAL}'"
-
-    n = max(len(requerida), len(actual))
-    requerida += (0,) * (n - len(requerida))
-    actual += (0,) * (n - len(actual))
-
-    if exacto and actual != requerida:
-        return f"api_engine exige exactamente {ver_str}, Engine es {API_ENGINE_ACTUAL}"
-
-    if not exacto and actual < requerida:
-        return f"api_engine exige >={ver_str}, Engine es {API_ENGINE_ACTUAL}"
-
-    return None
-
-
-# -----------------------------------------------------------
-# COMPARACIÓN DE COMPATIBILIDAD
-# -----------------------------------------------------------
-
-def _comparar_compatible_desde(self, declarado: str, nombre: str) -> Optional[str]:
-    raw = str(declarado).strip()
-    if not raw:
-        return f"{nombre}: compatible_desde vacío"
-
-    requerida = self._parse_version(raw)
-    if requerida is None:
-        return f"{nombre}: compatible_desde no parseable: '{declarado}'"
-
-    actual = self._parse_version(VERSION_ENGINE)
-    if actual is None:
         return None
 
-    n = max(len(requerida), len(actual))
-    requerida += (0,) * (n - len(requerida))
-    actual += (0,) * (n - len(actual))
+    def _comparar_compatible_desde(self, declarado: str, nombre: str) -> Optional[str]:
+        raw = str(declarado).strip()
+        if not raw:
+            return f"{nombre}: compatible_desde vacío"
 
-    if actual < requerida:
-        return f"{nombre}: compatible_desde={raw} pero Engine es {VERSION_ENGINE}"
+        requerida = self._parse_version(raw)
+        if requerida is None:
+            return f"{nombre}: compatible_desde no parseable: '{declarado}'"
 
-    return None
+        actual = self._parse_version(VERSION_ENGINE)
+        if actual is None:
+            return None
 
+        n = max(len(requerida), len(actual))
+        requerida += (0,) * (n - len(requerida))
+        actual += (0,) * (n - len(actual))
 
-# ===========================================================
-# FIN VERSIONES
-# ===========================================================
+        if actual < requerida:
+            return f"{nombre}: compatible_desde={raw} pero Engine es {VERSION_ENGINE}"
 
-# ===========================================================
-# VALIDACIÓN COMPLETA DEL CONTRATO
-# ===========================================================
+        return None
 
-def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
+    # ===========================================================
+    # VALIDACIÓN COMPLETA DEL CONTRATO
+    # ===========================================================
 
-    errores: List[str] = []
+    def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
 
-    # -------------------------------------------------------
-    # ESQUEMA
-    # -------------------------------------------------------
+        errores: List[str] = []
 
-    if meta.get("esquema") != ESQUEMA_CONTRATO_REQUERIDO:
-        errores.append(f"{nombre}: esquema '{meta.get('esquema')}' != '{ESQUEMA_CONTRATO_REQUERIDO}'")
+        # -------------------------------------------------------
+        # ESQUEMA
+        # -------------------------------------------------------
 
-    # -------------------------------------------------------
-    # VERSIÓN DEL CONTRATO
-    # -------------------------------------------------------
+        if meta.get("esquema") != ESQUEMA_CONTRATO_REQUERIDO:
+            errores.append(f"{nombre}: esquema '{meta.get('esquema')}' != '{ESQUEMA_CONTRATO_REQUERIDO}'")
 
-    vc = meta.get("version_contrato")
-    if str(vc) != VERSION_CONTRATO_REQUERIDA:
-        errores.append(f"{nombre}: version_contrato '{vc}' != '{VERSION_CONTRATO_REQUERIDA}'")
+        # -------------------------------------------------------
+        # VERSIÓN DEL CONTRATO
+        # -------------------------------------------------------
 
-    # -------------------------------------------------------
-    # VERSIÓN DEL MÓDULO
-    # -------------------------------------------------------
+        vc = meta.get("version_contrato")
+        if str(vc) != VERSION_CONTRATO_REQUERIDA:
+            errores.append(f"{nombre}: version_contrato '{vc}' != '{VERSION_CONTRATO_REQUERIDA}'")
 
-    vm = meta.get("version_modulo")
-    if not isinstance(vm, str) or not vm.strip():
-        errores.append(f"{nombre}: version_modulo debe ser str no vacío, es {type(vm).__name__}")
+        # -------------------------------------------------------
+        # VERSIÓN DEL MÓDULO
+        # -------------------------------------------------------
 
-    # -------------------------------------------------------
-    # CLAVES OBLIGATORIAS
-    # -------------------------------------------------------
+        vm = meta.get("version_modulo")
+        if not isinstance(vm, str) or not vm.strip():
+            errores.append(f"{nombre}: version_modulo debe ser str no vacío, es {type(vm).__name__}")
 
-    for clave in CLAVES_OBLIGATORIAS_CONTRATO:
-        if clave not in meta:
-            errores.append(f"{nombre}: falta clave obligatoria '{clave}'")
+        # -------------------------------------------------------
+        # CLAVES OBLIGATORIAS
+        # -------------------------------------------------------
 
-    # -------------------------------------------------------
-    # LISTAS DE STR
-    # -------------------------------------------------------
+        for clave in CLAVES_OBLIGATORIAS_CONTRATO:
+            if clave not in meta:
+                errores.append(f"{nombre}: falta clave obligatoria '{clave}'")
 
-    for clave in LISTAS_STR_OBLIGATORIAS:
-        if clave in meta:
-            errores.extend(self._validar_lista_str(meta, clave, nombre))
-
-    # -------------------------------------------------------
-    # DEPENDENCIAS
-    # -------------------------------------------------------
-
-    requiere = meta.get("requiere")
-    if not isinstance(requiere, list):
-        errores.append(f"{nombre}: 'requiere' debe ser list")
-    else:
-        for i, item in enumerate(requiere):
-            if not isinstance(item, str):
-                errores.append(f"{nombre}: 'requiere[{i}]' debe ser str, es {type(item).__name__}")
-
-    # -------------------------------------------------------
-    # CAPACIDADES
-    # -------------------------------------------------------
-
-    caps = meta.get("capacidades")
-    if not isinstance(caps, dict):
-        errores.append(f"{nombre}: 'capacidades' debe ser dict")
-        caps = {}
-    else:
-        for k, v in caps.items():
-            if not callable(v):
-                errores.append(f"{nombre}: capacidad '{k}' no es callable (tipo={type(v).__name__})")
-
-    # -------------------------------------------------------
-    # METADATOS DE CAPACIDADES
-    # -------------------------------------------------------
-
-    meta_caps = meta.get("capacidades_meta")
-    if not isinstance(meta_caps, dict):
-        errores.append(f"{nombre}: 'capacidades_meta' debe ser dict")
-    else:
-        for k in caps:
-            if k not in meta_caps:
-                errores.append(f"{nombre}: capacidad '{k}' sin entrada en capacidades_meta")
-                continue
-            entrada_meta = meta_caps[k]
-            if not isinstance(entrada_meta, dict):
-                errores.append(f"{nombre}: capacidades_meta['{k}'] debe ser dict, es {type(entrada_meta).__name__}")
-                continue
-            for campo in CLAVES_META_CAPACIDAD:
-                if campo not in entrada_meta:
-                    errores.append(f"{nombre}: capacidades_meta['{k}'] falta '{campo}'")
-                elif not isinstance(entrada_meta[campo], str):
-                    errores.append(f"{nombre}: capacidades_meta['{k}']['{campo}'] debe ser str")
-
-    # -------------------------------------------------------
-    # AUTORIZACIÓN ENGINE
-    # -------------------------------------------------------
-
-    auth = meta.get("autoriza_engine")
-    if not isinstance(auth, dict):
-        errores.append(f"{nombre}: 'autoriza_engine' debe ser dict")
-    else:
-        for permiso in PERMISOS_AUTORIZA_ENGINE:
-            if permiso not in auth:
-                errores.append(f"{nombre}: autoriza_engine falta permiso '{permiso}'")
-            elif not isinstance(auth[permiso], bool):
-                errores.append(f"{nombre}: autoriza_engine['{permiso}'] debe ser bool, es {type(auth[permiso]).__name__}")
-        extras = set(auth) - set(PERMISOS_AUTORIZA_ENGINE)
-        if extras:
-            errores.append(f"{nombre}: autoriza_engine permisos desconocidos: {sorted(extras)}")
-
-    # -------------------------------------------------------
-    # REPORTING
-    # -------------------------------------------------------
-
-    reporting = meta.get("reporting")
-    if not isinstance(reporting, dict):
-        errores.append(f"{nombre}: 'reporting' debe ser dict")
-    else:
-        for bandera in BANDERAS_REPORTING:
-            if bandera not in reporting:
-                errores.append(f"{nombre}: reporting falta bandera '{bandera}'")
-            elif not isinstance(reporting[bandera], bool):
-                errores.append(f"{nombre}: reporting['{bandera}'] debe ser bool, es {type(reporting[bandera]).__name__}")
-
-    # -------------------------------------------------------
-    # ESTADOS VÁLIDOS
-    # -------------------------------------------------------
-
-    ev = meta.get("estados_validos")
-    if not isinstance(ev, list):
-        errores.append(f"{nombre}: 'estados_validos' debe ser list")
-    elif not ev:
-        errores.append(f"{nombre}: 'estados_validos' no puede estar vacío")
-    else:
-        for i, est in enumerate(ev):
-            if not isinstance(est, str):
-                errores.append(f"{nombre}: estados_validos[{i}] debe ser str")
-            elif est not in ESTADOS_CANONICOS:
-                errores.append(f"{nombre}: estados_validos[{i}]='{est}' no es canónico. Admitidos: {ESTADOS_CANONICOS}")
-
-    # -------------------------------------------------------
-    # API ENGINE
-    # -------------------------------------------------------
-
-    err_api = self._comparar_api(str(meta.get("api_engine", "")))
-    if err_api:
-        errores.append(f"{nombre}: {err_api}")
-
-    # -------------------------------------------------------
-    # COMPATIBILIDAD
-    # -------------------------------------------------------
-
-    err_cd = self._comparar_compatible_desde(str(meta.get("compatible_desde", "")), nombre)
-    if err_cd:
-        errores.append(err_cd)
-
-    return errores
-
-# ===========================================================
-# FIN VALIDACIÓN COMPLETA DEL CONTRATO
-# ===========================================================
-    
-
-                # -------------------------------------------------------
+        # -------------------------------------------------------
         # LISTAS DE STR
         # -------------------------------------------------------
 
         for clave in LISTAS_STR_OBLIGATORIAS:
             if clave in meta:
                 errores.extend(self._validar_lista_str(meta, clave, nombre))
-
 
         # -------------------------------------------------------
         # DEPENDENCIAS
@@ -850,7 +691,6 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
             for i, item in enumerate(requiere):
                 if not isinstance(item, str):
                     errores.append(f"{nombre}: 'requiere[{i}]' debe ser str, es {type(item).__name__}")
-
 
         # -------------------------------------------------------
         # CAPACIDADES
@@ -865,7 +705,6 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
                 if not callable(v):
                     errores.append(f"{nombre}: capacidad '{k}' no es callable (tipo={type(v).__name__})")
 
-
         # -------------------------------------------------------
         # METADATOS DE CAPACIDADES
         # -------------------------------------------------------
@@ -878,22 +717,16 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
                 if k not in meta_caps:
                     errores.append(f"{nombre}: capacidad '{k}' sin entrada en capacidades_meta")
                     continue
-
                 entrada_meta = meta_caps[k]
                 if not isinstance(entrada_meta, dict):
                     errores.append(f"{nombre}: capacidades_meta['{k}'] debe ser dict, es {type(entrada_meta).__name__}")
                     continue
-
                 for campo in CLAVES_META_CAPACIDAD:
                     if campo not in entrada_meta:
                         errores.append(f"{nombre}: capacidades_meta['{k}'] falta '{campo}'")
                     elif not isinstance(entrada_meta[campo], str):
                         errores.append(f"{nombre}: capacidades_meta['{k}']['{campo}'] debe ser str")
 
-
-        # -------------------------------------------------------
-        # FIN METADATOS DE CAPACIDADES
-        # -------------------------------------------------------
         # -------------------------------------------------------
         # AUTORIZACIÓN ENGINE
         # -------------------------------------------------------
@@ -907,11 +740,9 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
                     errores.append(f"{nombre}: autoriza_engine falta permiso '{permiso}'")
                 elif not isinstance(auth[permiso], bool):
                     errores.append(f"{nombre}: autoriza_engine['{permiso}'] debe ser bool, es {type(auth[permiso]).__name__}")
-
-            extras = set(auth.keys()) - set(PERMISOS_AUTORIZA_ENGINE)
+            extras = set(auth) - set(PERMISOS_AUTORIZA_ENGINE)
             if extras:
                 errores.append(f"{nombre}: autoriza_engine permisos desconocidos: {sorted(extras)}")
-
 
         # -------------------------------------------------------
         # REPORTING
@@ -926,7 +757,6 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
                     errores.append(f"{nombre}: reporting falta bandera '{bandera}'")
                 elif not isinstance(reporting[bandera], bool):
                     errores.append(f"{nombre}: reporting['{bandera}'] debe ser bool, es {type(reporting[bandera]).__name__}")
-
 
         # -------------------------------------------------------
         # ESTADOS VÁLIDOS
@@ -944,7 +774,6 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
                 elif est not in ESTADOS_CANONICOS:
                     errores.append(f"{nombre}: estados_validos[{i}]='{est}' no es canónico. Admitidos: {ESTADOS_CANONICOS}")
 
-
         # -------------------------------------------------------
         # API ENGINE
         # -------------------------------------------------------
@@ -952,7 +781,6 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
         err_api = self._comparar_api(str(meta.get("api_engine", "")))
         if err_api:
             errores.append(f"{nombre}: {err_api}")
-
 
         # -------------------------------------------------------
         # COMPATIBILIDAD
@@ -963,12 +791,6 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
             errores.append(err_cd)
 
         return errores
-
-
-    # ===========================================================
-    # FIN VALIDACIÓN COMPLETA DEL CONTRATO
-    # ===========================================================
-
 
     # ===========================================================
     # CARGA Y REGISTRO
@@ -995,11 +817,7 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
                 for error in errores_dup:
                     self.errores_arranque.append(f"{nombre}: {error}")
 
-
     # ===========================================================
-    # FIN CARGA Y REGISTRO
-    # ===========================================================
-        # ===========================================================
     # DEPENDENCIAS
     # ===========================================================
 
@@ -1058,11 +876,6 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
         self._dependencias = {"grafo": dict(grafo_dep), "faltantes": dict(faltantes), "orden_topologico": orden, "ciclos": ciclos}
 
     # ===========================================================
-    # FIN DEPENDENCIAS
-    # ===========================================================
-
-
-    # ===========================================================
     # GRAFO
     # ===========================================================
 
@@ -1100,9 +913,6 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
         self._grafo = {"nodos": nodos, "aristas": aristas}
 
     # ===========================================================
-    # FIN GRAFO
-    # ===========================================================
-    # ===========================================================
     # CENSO
     # ===========================================================
 
@@ -1127,10 +937,6 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
         }
 
     # ===========================================================
-    # FIN CENSO
-    # ===========================================================
-
-    # ===========================================================
     # TRAZAS DE EJECUCIÓN
     # ===========================================================
 
@@ -1151,22 +957,31 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
                 entrada[clave] = valor
         self._trazas.append(entrada)
 
-
-    # -----------------------------------------------------------
-    # CONSULTA DE TRAZAS
-    # -----------------------------------------------------------
-
     def obtener_trazas(self) -> Tuple[Dict[str, Any], ...]:
         return tuple(dict(traza) for traza in self._trazas)
 
     # ===========================================================
-    # FIN TRAZAS DE EJECUCIÓN
-    # ===========================================================
-        # ===========================================================
     # MAPA DE RUTA DE EJECUCIÓN
     # ===========================================================
 
-    def _registrar_ruta(self, *, modulo: str, rol: str, id_modulo: str, capacidad: str, entrada: Any, resultado: Any = None, estado: str, contenedor_resuelto: bool, contrato_resuelto: bool, capacidad_resuelta: bool, funcion_invocada: bool, contenido_entregado: bool, contenido_recibido: bool, error: Optional[str] = None) -> None:
+    def _registrar_ruta(
+        self,
+        *,
+        modulo: str,
+        rol: str,
+        id_modulo: str,
+        capacidad: str,
+        entrada: Any,
+        resultado: Any = None,
+        estado: str,
+        contenedor_resuelto: bool,
+        contrato_resuelto: bool,
+        capacidad_resuelta: bool,
+        funcion_invocada: bool,
+        contenido_entregado: bool,
+        contenido_recibido: bool,
+        error: Optional[str] = None,
+    ) -> None:
         self._ruta_seq += 1
         entrada_ruta: Dict[str, Any] = {
             "id_ruta": self._ruta_seq,
@@ -1193,44 +1008,23 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
             entrada_ruta["error"] = error
         self._mapa_ruta.append(entrada_ruta)
 
-
-    # -----------------------------------------------------------
-    # CONSULTA DEL MAPA DE RUTA
-    # -----------------------------------------------------------
-
     def obtener_mapa_ruta(self) -> Tuple[Dict[str, Any], ...]:
         return tuple(dict(ruta) for ruta in self._mapa_ruta)
 
     # ===========================================================
-    # FIN MAPA DE RUTA DE EJECUCIÓN
-    # ===========================================================
-        # ===========================================================
     # RESOLUCIÓN DE CONTENEDOR
     # ===========================================================
 
     def _resolver_contenedor(self, modulo_o_rol: Any) -> Tuple[Optional[Contenedor], Optional[str]]:
 
-        # -------------------------------------------------------
-        # CASO CRÍTICO
-        # -------------------------------------------------------
-
         if isinstance(modulo_o_rol, Contenedor):
             return modulo_o_rol, None
-
-        # -------------------------------------------------------
-        # RESOLUCIÓN NORMAL: NOMBRE / ID / ROL
-        # -------------------------------------------------------
 
         cont = self.registro.primero(modulo_o_rol)
         if cont is None:
             return None, f"Módulo/rol no encontrado: {modulo_o_rol}"
 
         return cont, None
-
-    # ===========================================================
-    # FIN RESOLUCIÓN DE CONTENEDOR
-    # ===========================================================
-
 
     # ===========================================================
     # VALIDACIÓN DE ENTRADA DE CAPACIDAD
@@ -1246,8 +1040,6 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
             firma = inspect.signature(fn)
             firma.bind(*args, **kwargs)
         except ValueError:
-            # Algunas callables no exponen firma.
-            # No se inventa una restricción.
             pass
         except TypeError as e:
             return f"Entrada incompatible con capacidad '{capacidad}': {e}"
@@ -1255,9 +1047,6 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
         return None
 
     # ===========================================================
-    # FIN VALIDACIÓN DE ENTRADA DE CAPACIDAD
-    # ===========================================================
-        # ===========================================================
     # EJECUCIÓN CONTRACTUAL
     # ===========================================================
 
@@ -1272,10 +1061,6 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
         No se transforma semánticamente el contenido.
         """
 
-        # -------------------------------------------------------
-        # 1. RESOLVER CONTENEDOR
-        # -------------------------------------------------------
-
         cont, error = self._resolver_contenedor(modulo_o_rol)
 
         if cont is None:
@@ -1288,10 +1073,6 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
             )
             return {"estado": "ERROR", "error": error}
 
-        # -------------------------------------------------------
-        # 2. CONTRATO RESUELTO
-        # -------------------------------------------------------
-
         if cont.autoriza_engine.get("ejecutar") is not True:
             error = f"{cont.nombre}: el contrato no autoriza la ejecución por Engine"
 
@@ -1303,10 +1084,6 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
                 error=error,
             )
             return {"estado": "ERROR", "modulo": cont.nombre, "rol": cont.rol, "id": cont.id, "capacidad": capacidad, "error": error}
-
-        # -------------------------------------------------------
-        # 3. RESOLVER CAPACIDAD DECLARADA
-        # -------------------------------------------------------
 
         fn = cont.fn(capacidad)
 
@@ -1321,10 +1098,6 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
                 error=error,
             )
             return {"estado": "ERROR", "modulo": cont.nombre, "rol": cont.rol, "id": cont.id, "capacidad": capacidad, "error": error}
-
-        # -------------------------------------------------------
-        # 4. VALIDAR ENTRADA
-        # -------------------------------------------------------
 
         error_entrada = self._validar_entrada_capacidad(cont, capacidad, args, kwargs)
 
@@ -1341,10 +1114,6 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
                 "id": cont.id, "capacidad": capacidad, "error": error_entrada,
             }
 
-        # -------------------------------------------------------
-        # 5. CONTENIDO REAL ENTREGADO
-        # -------------------------------------------------------
-
         contenido_entregado = bool(args) or bool(kwargs)
 
         self._registrar_ruta(
@@ -1353,10 +1122,6 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
             contenedor_resuelto=True, contrato_resuelto=True, capacidad_resuelta=True,
             funcion_invocada=False, contenido_entregado=contenido_entregado, contenido_recibido=False,
         )
-
-        # -------------------------------------------------------
-        # 6. INVOCACIÓN REAL
-        # -------------------------------------------------------
 
         inicio = time.perf_counter()
         funcion_invocada = False
@@ -1374,10 +1139,6 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
             resultado = fn(*args, **kwargs)
             duracion = round(time.perf_counter() - inicio, 6)
 
-            # ---------------------------------------------------
-            # 7. RESULTADO RECIBIDO
-            # ---------------------------------------------------
-
             contenido_recibido = contenido_entregado
 
             self._registrar_ruta(
@@ -1389,17 +1150,9 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
                 contenido_recibido=contenido_recibido,
             )
 
-            # ---------------------------------------------------
-            # 8. TRAZA
-            # ---------------------------------------------------
-
             self._registrar_traza(
                 modulo=cont.nombre, capacidad=capacidad, estado="EXITO", duracion_s=duracion,
             )
-
-            # ---------------------------------------------------
-            # 9. SALIDA CANÓNICA
-            # ---------------------------------------------------
 
             salida = {
                 "estado": "EXITO",
@@ -1411,10 +1164,6 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
                 "duracion_s": duracion,
             }
 
-            # ---------------------------------------------------
-            # 10. REGISTRO DE EVALUACIÓN
-            # ---------------------------------------------------
-
             self.resultados_evaluacion.append(salida)
             return salida
 
@@ -1422,19 +1171,11 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
             duracion = round(time.perf_counter() - inicio, 6)
             error_msg = f"{type(e).__name__}: {e}"
 
-            # ---------------------------------------------------
-            # TRAZA DE ERROR
-            # ---------------------------------------------------
-
             self._registrar_traza(
                 modulo=cont.nombre, capacidad=capacidad,
                 estado="ERROR_EJECUCION", duracion_s=duracion,
                 error=error_msg,
             )
-
-            # ---------------------------------------------------
-            # MAPA DE RUTA DE ERROR
-            # ---------------------------------------------------
 
             self._registrar_ruta(
                 modulo=cont.nombre, rol=cont.rol, id_modulo=cont.id, capacidad=capacidad,
@@ -1461,10 +1202,6 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
             return salida
 
     # ===========================================================
-    # FIN EJECUCIÓN CONTRACTUAL
-    # ===========================================================
-
-        # ===========================================================
     # ATAJOS DE CAPACIDADES
     # ===========================================================
 
@@ -1483,11 +1220,6 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
         return self.ejecutar_capacidad(modulo_o_rol, capacidad, payload)
 
     # ===========================================================
-    # FIN ATAJOS DE CAPACIDADES
-    # ===========================================================
-
-
-    # ===========================================================
     # INVOCADOR
     # ===========================================================
 
@@ -1503,37 +1235,20 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
         return salida
 
     # ===========================================================
-    # FIN INVOCADOR
-    # ===========================================================
-
-
-    # ===========================================================
     # CONSOLIDACIÓN
     # ===========================================================
 
     def consolidar_reportes(self) -> Dict[str, Any]:
         for nombre, cont in self.registro.contenedores.items():
 
-            # ---------------------------------------------------
-            # REPORTE
-            # ---------------------------------------------------
-
             if "reporte" in cont.capacidades:
                 r = self.ejecutar_capacidad(nombre, "reporte")
                 self._reportes_modulos[nombre] = r.get("resultado") if r.get("estado") == "EXITO" else {"error": r.get("error"), "estado": "NO ENTREGADO POR MODULO"}
-
-            # ---------------------------------------------------
-            # DIAGNÓSTICO
-            # ---------------------------------------------------
 
             if "diagnostico" in cont.capacidades:
                 d = self.ejecutar_capacidad(nombre, "diagnostico")
                 if d.get("estado") == "EXITO":
                     self._diagnosticos[nombre] = d.get("resultado")
-
-            # ---------------------------------------------------
-            # INVENTARIO
-            # ---------------------------------------------------
 
             if "inventario" in cont.capacidades:
                 inv = self.ejecutar_capacidad(nombre, "inventario")
@@ -1547,9 +1262,6 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
         }
 
     # ===========================================================
-    # FIN CONSOLIDACIÓN
-    # ===========================================================
-        # ===========================================================
     # PAQUETE OMEGA
     # ===========================================================
 
@@ -1558,10 +1270,6 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
             self.consolidar_reportes()
 
         reportes_lista: List[Dict[str, Any]] = []
-
-        # -------------------------------------------------------
-        # METADATA
-        # -------------------------------------------------------
 
         reportes_lista.append({
             "id": "metadata",
@@ -1582,10 +1290,6 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             },
         })
-
-        # -------------------------------------------------------
-        # MÓDULOS
-        # -------------------------------------------------------
 
         orden = 1
 
@@ -1626,10 +1330,6 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
 
             orden += 1
 
-        # -------------------------------------------------------
-        # DEPENDENCIAS
-        # -------------------------------------------------------
-
         reportes_lista.append({
             "id": "dependencias",
             "titulo": "DEPENDENCIAS",
@@ -1638,10 +1338,6 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
         })
 
         orden += 1
-
-        # -------------------------------------------------------
-        # GRAFO
-        # -------------------------------------------------------
 
         reportes_lista.append({
             "id": "grafo",
@@ -1652,10 +1348,6 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
 
         orden += 1
 
-        # -------------------------------------------------------
-        # TRAZAS
-        # -------------------------------------------------------
-
         reportes_lista.append({
             "id": "trazas",
             "titulo": "TRAZAS DE EJECUCIÓN",
@@ -1664,10 +1356,6 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
         })
 
         orden += 1
-
-        # -------------------------------------------------------
-        # MAPA DE RUTA
-        # -------------------------------------------------------
 
         reportes_lista.append({
             "id": "mapa_ruta",
@@ -1690,11 +1378,6 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
         }
 
     # ===========================================================
-    # FIN PAQUETE OMEGA
-    # ===========================================================
-
-
-    # ===========================================================
     # ESTADO GLOBAL
     # ===========================================================
 
@@ -1715,9 +1398,6 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
         }
 
     # ===========================================================
-    # FIN ESTADO GLOBAL
-    # ===========================================================
-        # ===========================================================
     # CENTINELA
     # ===========================================================
 
@@ -1774,22 +1454,21 @@ def _validar_esquema(self, meta: Dict[str, Any], nombre: str) -> List[str]:
             raise
 
 
-    # ===========================================================
-    # EXPORTACIONES
-    # ===========================================================
+# ===========================================================
+# EXPORTACIONES
+# ===========================================================
 
-    __all__ = [
-        "Engine",
-        "ArranqueError",
-        "Contenedor",
-        "RegistroModulos",
-        "VERSION_ENGINE",
-        "ESQUEMA_CONTRATO_REQUERIDO",
-        "VERSION_CONTRATO_REQUERIDA",
-    ]
+__all__ = [
+    "Engine",
+    "ArranqueError",
+    "Contenedor",
+    "RegistroModulos",
+    "VERSION_ENGINE",
+    "ESQUEMA_CONTRATO_REQUERIDO",
+    "VERSION_CONTRATO_REQUERIDA",
+]
 
 
-    # ===========================================================
-    # FIN DEL MÓDULO ENGINE
-    # ===========================================================
-    
+# ===========================================================
+# FIN DEL MÓDULO ENGINE
+# ===========================================================
