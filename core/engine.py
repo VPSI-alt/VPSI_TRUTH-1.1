@@ -229,16 +229,16 @@ class Engine:
             return None
 
     def _comparar_api(self, declarado: str) -> Optional[str]:
-        raw = str(declarado).strip()
-        if not raw:
-            return "api_engine vacío"
-        exacto, ver_str = (False, raw[2:].strip()) if raw.startswith(">=") else (True, raw)
-        requerida = self._parse_version(ver_str)
-        if requerida is None:
-            return f"api_engine no parseable: '{declarado}'"
-        actual = self._parse_version(API_ENGINE_ACTUAL)
-        if actual is None:
-            return f"API_ENGINE_ACTUAL inválida: '{API_ENGINE_ACTUAL}'"
-        n = max(len(requerida), len(actual))
-        requerida += (0,) * (n - len(requerida))
-        actual += (0,) * (n - len(
+    raw = str(declarado).strip()
+    if not raw:
+        return "api_engine vacío"
+    exacto, ver_str = (False, raw[2:].strip()) if raw.startswith(">=") else (True, raw)
+    requerida = self._parse_version(ver_str)
+    if requerida is None:
+        return f"api_engine no parseable: '{declarado}'"
+    actual = self._parse_version(API_ENGINE_ACTUAL)
+    if actual is None:
+        return f"API_ENGINE_ACTUAL inválida: '{API_ENGINE_ACTUAL}'"
+    n = max(len(requerida), len(actual))
+    requerida += (0,) * (n - len(requerida))
+    actual += (0,) * (n - len(actual))  # ← LÍNEA CORREGIDA
